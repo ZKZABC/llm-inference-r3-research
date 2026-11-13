@@ -132,22 +132,24 @@ python r3_verify.py \
 | 3 | `NVRTCCompiler failed` | Blackwell sm_120 + CUDA graph 编译失败 | `--enforce-eager` |
 | 4 | `failed to open libnvrtc-builtins.so.13.0` | 库在 venv 的 `site-packages/nvidia/cu13/lib/`，但 NVRTC 是 C 层加载器，不走 Python 路径 | 设 `LD_LIBRARY_PATH` |
 | 5 | `driver.c: fatal error: Python.h` | Triton 要 JIT 编译 C 扩展，缺 Python 开发头文件 | `apt install python3-dev` |
-| 6 | `Offloader set to UVAOffloader` + `KV cache memory: -0.46 GiB` | **WSL2 不支持 pinned memory**，UVA offload 静默回退到 device memory，等于没 offload | 换 `prefetch` 后端——但实测只省 0.16 GB，仍不够 |
+| 6 | `Could not find nvcc and default cuda_home='/usr/local/cuda' doesn't exist` | vLLM 选了 FlashInfer 做采样，它要 nvcc 现场编译 | `VLLM_USE_FLASHINFER_SAMPLER=0` |
+| 7 | `Pinned memory is not available on this platform` | **WSL2 其实支持 pinned memory（实测可分配 3GB），是 vLLM 平台判断误判**；`is_uva_available()` 返回 False → 用 `NonUvaBuffer` | 改 `vllm/utils/platform_utils.py:57` → `return True`。**必须改源码：spawn 子进程不继承 monkey patch** |
+| 8 | offload 报告搬运 3.01 GB，但 `Model loading took` 仍是 7.85 GiB | **vLLM 0.33 的 UVA offloader 对 GPTQ MoE 只记账不搬运**：多复制一份到 CPU（加载变慢），不释放 GPU 原件 | 无解。`--max-num-batched-tokens 512` 只省激活（-0.46→-0.11 GiB），补不上 7.85 GiB 模型本体 |
 
-### 第 6 个坑的最终结论
+### 第 8 个坑的最终结论
 
 ```
-模型实占:        7.69 ~ 7.85 GiB
+模型实占:        7.85 GiB（offload 前后一模一样）
 GPU 总显存:      7.96 GiB
 Windows 占用:    1.11 GiB
 实际可用:        6.85 GiB
 缺口:            ≈ 1 GiB
 ```
 
-**UVA 与 prefetch 两种 offload 后端都补不上这 1 GiB**，因为 GPTQ 量化的 MoE 专家权重在 vLLM 里是融合 tensor，offloader 无法按层/按参数拆分搬运。
+**UVA 与 prefetch 两种 offload 后端都无效**：UVA 因为误判走不到 pinned 路径（改源码后走通了但仍不搬运），prefetch 只省 0.16 GB（接管 6 个小模块，没碰专家权重）。
 
-> **结论：8GB 消费级卡 + WSL2 + vLLM 跑 14B MoE，在当前软件栈下是硬件天花板。**
-> 这本身就是一个有价值的结论——它说明"最小验证方案"必须在文档里明确标注硬件前提。
+> **结论：8GB 消费级卡 + WSL2 + vLLM 0.33 跑 14B MoE，在当前软件栈下是硬件天花板。**
+> 这不是"参数没调对"，而是 vLLM 的 CPU offload 在「WSL + Blackwell sm_120 + GPTQ 量化 MoE」这个四重叠加场景下存在实现缺陷——这种组合不在它的测试矩阵里。
 
 ## 设计哲学：校验的应该是环境，不只是数据
 

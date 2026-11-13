@@ -133,8 +133,9 @@ python r3_verify.py --model ~/models/Qwen1.5-MoE-A2.7B-Chat-GPTQ-Int4 --max-mode
 |---|---|---|
 | `CUDA out of memory` | 8GB 塞不下 8GB 权重 | **见第 7 步 OOM 预案**：`--cpu-offload-gb 6 --cpu-offload-params experts --offload-backend uva` |
 | `pydantic ValidationError: cpu_offload_params Input should be a valid set` | **vLLM 0.33 的 Python API 要 `set[str]`，不是 `str`**（CLI 会自动转，`LLM(...)` 不会） | 传 `cpu_offload_params={'experts'}`，脚本已自动转换 |
-| `Pinned memory is not available on this platform; falling back to device memory` | **WSL2 不支持 pinned memory**，UVA offload 静默失效（权重又回到显存），表现为 `Available KV cache memory: -0.46 GiB` | 换后端：`--offload-backend prefetch --offload-group-size 4 --offload-num-in-group 1`（不传 `--cpu-offload-gb/--cpu-offload-params`） |
+| `Pinned memory is not available on this platform; falling back to device memory` | **WSL2 实测支持 pinned memory（可分配 3GB），是 vLLM 的平台判断误判**。`is_uva_available()` 返回 False 导致用 `NonUvaBuffer`（pin_memory=False），offload 静默失效 | 改 `vllm/utils/platform_utils.py:57` 的 `return is_pin_memory_available() or ...` → `return True`（**必须改源码，spawn 子进程不继承 monkey patch**） |
 | `Value error, offload_num_in_group (1) must be <= offload_group_size (0)` | prefetch 后端必须显式给 group_size | 加 `--offload-group-size 4`（0 表示禁用） |
+| offload 生效了但显存没降（`Total CPU offloaded parameters: 3.01` 而 `Model loading took` 仍是 7.85 GiB） | **vLLM 0.33 的 UVA offloader 对 GPTQ MoE 只记账不搬运**：额外复制一份到 CPU（加载变慢），但不释放 GPU 原件 | 无解。`--max-num-batched-tokens 512` 只能省激活内存（KV 预算 -0.46→-0.11），补不上 7.85 GiB 的模型本体 |
 | `ValueError: Free memory on device cuda:0 (x/y GiB) on startup is less than desired GPU memory utilization` | `gpu_memory_utilization` 校验的是**启动时空闲显存**，不是总显存；别的程序占了显存就到不了 0.95 | 降到 0.85；顺便关掉浏览器/微信等吃显存的程序 |
 | `nvrtc: error: failed to open libnvrtc-builtins.so.13.0` | 该库在 venv 的 `site-packages/nvidia/cu13/lib/` 里，但 NVRTC 是 C 层加载器，不走 Python 路径 | `export LD_LIBRARY_PATH=$HOME/r3env/lib/python3.14/site-packages/nvidia/cu13/lib:$LD_LIBRARY_PATH` |
 | `driver.c: fatal error: Python.h: No such file or directory` | Triton 要 JIT 编译 C 扩展，缺 Python 开发头文件 | `sudo apt install -y python3-dev python3.14-dev` |

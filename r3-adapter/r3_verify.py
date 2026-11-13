@@ -32,6 +32,41 @@ import os
 # 缺失时 MoE 的 top-k 可能因数值差异产生不同路由，R3 回放就失去意义。
 os.environ.setdefault("VLLM_BATCH_INVARIANT", "1")
 
+
+def _force_pin_memory_available() -> bool:
+    """坑 #7：vLLM 在 WSL 上误判 pinned memory 不可用。
+
+    实测（WSL2 + RTX 5060）：torch.empty(pin_memory=True) 能正常分配 3 GB，
+    但 vLLM 的 is_pin_memory_available() 返回 False，于是 UVA offload 静默回退
+    到 device memory —— 权重根本没搬走，KV cache 预算变成负数（-0.46 GiB）。
+
+    这里强制覆盖成 True，让 offload 真正生效。
+    这是「框架的防御性降级把可用路径变成不可用路径」的典型案例。
+    """
+    import importlib
+
+    candidates = [
+        "vllm.utils.buffer_utils",
+        "vllm.utils",
+        "vllm.worker.buffer_utils",
+        "vllm.v1.worker.buffer_utils",
+    ]
+    for name in candidates:
+        try:
+            m = importlib.import_module(name)
+        except Exception:
+            continue
+        if hasattr(m, "is_pin_memory_available"):
+            m.is_pin_memory_available = lambda: True
+            print(f"  [patch] 强制 {name}.is_pin_memory_available() -> True")
+            return True
+
+    print("  [patch] 未找到 is_pin_memory_available，跳过（offload 可能仍会失效）")
+    return False
+
+
+_force_pin_memory_available()
+
 import argparse
 
 import numpy as np
@@ -41,7 +76,8 @@ def run_once(model: str, tp: int, prompt: str, max_tokens: int,
              max_model_len: int, gpu_util: float, dtype: str,
              cpu_offload_gb: float, cpu_offload_params: str,
              offload_backend: str, enforce_eager: bool = False,
-             offload_group_size: int = 0, offload_num_in_group: int = 1):
+             offload_group_size: int = 0, offload_num_in_group: int = 1,
+             max_num_batched_tokens: int = 0, max_num_seqs: int = 0):
     """跑一次推理，返回 (routed_experts, prompt_len, gen_len, num_experts)。"""
     from vllm import LLM, SamplingParams
 
@@ -54,6 +90,12 @@ def run_once(model: str, tp: int, prompt: str, max_tokens: int,
         dtype=dtype,                        # 4bit 模型会自动识别，也可显式 half
         enforce_eager=enforce_eager,        # 坑 #3：Blackwell(sm_120) 上 CUDA graph 可能编译失败
     )
+    # 坑 #8：profile_run 用 dummy batch 测峰值显存，MoE 上会把 offload 的专家全拉回 GPU，
+    # 导致 offload 白做。压小 batch 能让峰值显存降下来。
+    if max_num_batched_tokens > 0:
+        llm_kwargs["max_num_batched_tokens"] = max_num_batched_tokens
+    if max_num_seqs > 0:
+        llm_kwargs["max_num_seqs"] = max_num_seqs
     # 8GB 卡装 8GB 权重 → 用 MoE 专家 offload
     # 坑 #1（实测于 vLLM 0.33.0）：Python API 里 cpu_offload_params 是 set[str]，
     # 传字符串会 pydantic ValidationError: "Input should be a valid set"。
@@ -132,6 +174,10 @@ def main():
                     help="prefetch 后端专用：每组层数（0=不启用 prefetch）")
     ap.add_argument("--offload-num-in-group", type=int, default=1,
                     help="prefetch 后端专用：每组中常驻 GPU 的层数（须 <= group-size）")
+    ap.add_argument("--max-num-batched-tokens", type=int, default=0,
+                    help="限制 prefill 批次（默认 8192）。MoE 上压小可避免 profile_run 把专家全拉回")
+    ap.add_argument("--max-num-seqs", type=int, default=0,
+                    help="最大并发序列数（默认 256）。压到 1 可进一步降 profile 峰值")
     ap.add_argument("--deterministic", action="store_true",
                     help="跑两次并对比路由是否一致（验证批不变性）")
     args = ap.parse_args()
@@ -151,7 +197,8 @@ def main():
                                  args.max_model_len, args.gpu_memory_utilization, args.dtype,
                                  args.cpu_offload_gb, args.cpu_offload_params,
                                  args.offload_backend, args.enforce_eager,
-                                 args.offload_group_size, args.offload_num_in_group)
+                                 args.offload_group_size, args.offload_num_in_group,
+                                 args.max_num_batched_tokens, args.max_num_seqs)
     validate(r1, p1, g1, n_exp)
     print(f"  ✓ 契约成立：拿到 {r1.shape[0]} 行路由，模型共 {n_exp} 个专家")
 
@@ -161,7 +208,8 @@ def main():
                                  args.max_model_len, args.gpu_memory_utilization, args.dtype,
                                  args.cpu_offload_gb, args.cpu_offload_params,
                                  args.offload_backend, args.enforce_eager,
-                                 args.offload_group_size, args.offload_num_in_group)
+                                 args.offload_group_size, args.offload_num_in_group,
+                                 args.max_num_batched_tokens, args.max_num_seqs)
         same = (np.asarray(r1) == np.asarray(r2)).all()
         print(f"  {'✓ 两次路由完全一致' if same else '✗ 两次路由不一致——检查 VLLM_BATCH_INVARIANT'}")
         assert same, "批不变性未满足，R3 回放将失效"
