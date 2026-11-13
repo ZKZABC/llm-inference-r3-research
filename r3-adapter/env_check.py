@@ -194,11 +194,14 @@ def check_memory() -> dict:
                 vals[k.strip()] = int(v.split()[0])  # kB
         info["total_gib"] = vals.get("MemTotal", 0) / 1024 / 1024
         info["avail_gib"] = vals.get("MemAvailable", 0) / 1024 / 1024
-        add("host 总内存", OK if info["total_gib"] >= 8 else WARN,
-            f"{info['total_gib']:.1f} GiB")
-        add("host 可用", OK if info["avail_gib"] >= 4 else WARN,
-            f"{info['avail_gib']:.1f} GiB",
-            "WSL 里：Windows 建 %UserProfile%\\.wslconfig 设 memory=10GB，再 wsl --shutdown")
+        # 注意：这里的"可用"是脚本运行时的快照。模型加载时 safetensors 会 mmap
+        # 7~8 GiB 进 page cache，MemAvailable 会明显下降（今晚实测降到 0.6 GiB）。
+        add("host 总内存", OK if info["total_gib"] >= 12 else WARN,
+            f"{info['total_gib']:.1f} GiB"
+            + ("" if info["total_gib"] >= 12 else "（WSL 默认只给一半，跑大模型偏紧）"),
+            "Windows 建 %UserProfile%\\.wslconfig 设 memory=10GB / swap=8GB，再 wsl --shutdown")
+        add("host 可用", OK if info["avail_gib"] >= 6 else WARN,
+            f"{info['avail_gib']:.1f} GiB（模型加载后还会明显下降）")
     else:
         add("host 内存", SKIP, "非 Linux，跳过")
 
@@ -283,16 +286,42 @@ def check_model(path: str, gpu: dict | None, mem: dict, util: float, max_len: in
         add("结论", OK, "显存够，无需 offload")
         return
 
-    # 超预算 → 需要 offload，但 offload 是否有效取决于 pinned memory
+    # ── 超预算 → 必须 offload。这里有两道预算要同时满足：host 内存 + pinned 能力 ──
+    shortfall = need - budget
+    add("offload 需求", WARN, f"{shortfall:.2f} GiB 权重必须驻留 host")
+
+    # ★ 坑 #6 的真正前置：offload 的权重吃 host RAM。
+    #   今晚实测基准：WSL 总内存 9.7 GiB、模型 7.84 GiB，加载后 MemAvailable 只剩 2.60 GiB
+    #   ——safetensors 的 mmap 会吃掉约 90% 模型大小的物理内存。
+    #   所以不能看"脚本运行时的空闲"，要看"加载完之后还剩多少"。
+    total = mem.get("total_gib", 0.0)
+    est_after_load = max(total - model_gib * 0.9 - 0.5, 0.0) if total else 0.0
+    host_cap = min(mem.get("avail_gib", est_after_load), est_after_load) if total else 0.0
+
+    if host_cap > 0:
+        ok_host = shortfall <= host_cap
+        add("host 内存预算", OK if ok_host else FAIL,
+            f"offload 需 {shortfall:.2f} GiB；模型加载后 host 约剩 {host_cap:.2f} GiB"
+            + ("" if ok_host else f"，缺口 {shortfall - host_cap:.2f} GiB"),
+            "" if ok_host else
+            "给 WSL 加内存：Windows 建 %UserProfile%\\.wslconfig 设 memory=10GB，"
+            "再 wsl --shutdown；或减少 offload 量")
+    else:
+        add("host 内存预算", SKIP, "非 Linux，读不到 /proc/meminfo")
+
+    # 再看 pinned 能力（决定 offload 会不会被静默降级）
     if mem.get("pinned") == FAIL:
         add("offload 可行性", FAIL,
-            "需要 offload，但 pinned memory 不可用 → 两种后端都救不了",
-            "见下方结论")
+            "pinned memory 不可用 → 两种后端都救不了", "见下方结论")
     elif mem.get("pinned") == OK:
-        add("offload 可行性", WARN,
-            "需要 offload，pinned 可用，但会很慢",
-            f"加 --cpu-offload-gb {min(int(need - budget) + 1, int(model_gib))} "
-            f"--cpu-offload-params experts --offload-backend uva")
+        if host_cap and shortfall > host_cap:
+            add("offload 可行性", FAIL,
+                "pinned 可用，但 host 内存不够分配 → 会静默回退 device memory",
+                "先把 host 内存加上去")
+        else:
+            add("offload 可行性", WARN, "pinned 可用，能跑但会很慢",
+                f"加 --cpu-offload-gb {int(shortfall) + 1} --cpu-offload-params experts "
+                f"--offload-backend uva")
     else:
         add("offload 可行性", WARN, "无法判断（缺 torch），建议先装依赖再复检")
 

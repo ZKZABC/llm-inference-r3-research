@@ -53,7 +53,25 @@ python env_check.py --model ~/models/Qwen1.5-MoE-A2.7B-Chat-GPTQ-Int4
 ```
 
 **这一步能省下 2 小时。** `env_check.py` 的每一条检查都对应下面「踩坑记录」里的一个真实坑：
-vLLM 版本、CUDA 架构、空闲显存、`libnvrtc-builtins`、`Python.h`、pinned memory、模型显存预算。
+vLLM 版本、CUDA 架构、空闲显存、`libnvrtc-builtins`、`Python.h`、pinned memory、
+**模型显存预算** 和 **host 内存预算**。
+
+两条预算的计算方式是这套脚本的核心：
+
+```
+显存预算：  模型 + KV cache + 激活    vs   空闲显存 × gpu_memory_utilization
+host 预算： 需要 offload 的量         vs   总内存 − 模型 × 0.9 − 0.5
+                                            ↑ 用 0.9 是因为实测 safetensors 的 mmap
+                                              会吃掉约 90% 模型大小的物理内存
+```
+
+实测校验（三次真实运行的数字）：
+
+| 场景 | 需 offload | host 加载后剩 | 判定 | 日志实测 |
+|---|---|---|---|---|
+| WSL 7.4 GiB | 2.61 GiB | 0.00 GiB | FAIL 缺口 2.61 | `Available RAM: 0.62 GiB` |
+| WSL 9.7 GiB | 2.61 GiB | 2.14 GiB | FAIL 缺口 0.46 | `Available RAM: 2.60 GiB` |
+| 4090 24GB + 64G RAM | — | — | 显存够，无需 offload | — |
 
 输出示例（真实结果）：
 
