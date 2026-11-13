@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="docx-page-size" content="A4">
+<title>大模型推理引擎技术调研与自研路线决策报告</title>
+<style>
+/* 页面规则：正文页脚居中页码，封面无页脚 */
+@page {
+  @bottom-center { content: counter(page); }
+}
+@page cover {
+  @bottom-center { content: none; }
+}
+section[role="cover"] { page: cover; }
+
+:root {
+  --fs-h1: 20pt;
+  --fs-h2: 15pt;
+  --fs-h3: 13pt;
+  --fs-body: 12pt;
+  --fs-small: 10pt;
+  --ff-heading: "黑体", SimHei, sans-serif;
+  --ff-body: "宋体", SimSun, serif;
+  --lh-body: 1.7;
+  --color-primary: #1a5fb4;
+  --color-deep: #0d3b7a;
+  --color-text: #000000;
+  --color-muted: #555555;
+  --color-border: #c9c9c9;
+  --color-bg: #ffffff;
+  --color-highlight: #f2f6fb;
+  --color-table-head: #e8f0fa;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: "宋体", SimSun, serif; font-size: 12pt; line-height: 1.7; color: #000000; background: #ffffff; }
+
+/* 封面 */
+.cover {
+  display: flex; flex-direction: column; justify-content: center;
+  min-height: 60vh; padding: 2.5cm; background: #f2f6fb;
+}
+.cover-category { font-family: "黑体", SimHei, sans-serif; font-size: 14pt; font-weight: 700; color: #1a5fb4; letter-spacing: 0.1em; margin-bottom: 0.8em; }
+.cover-title { font-family: "黑体", SimHei, sans-serif; font-size: 26pt; font-weight: 700; color: #0d3b7a; line-height: 1.4; margin-bottom: 0.5em; }
+.cover-subtitle { font-family: "黑体", SimHei, sans-serif; font-size: 15pt; color: #555555; margin-bottom: 2em; }
+.cover-meta { font-size: 10pt; color: #555555; line-height: 1.8; }
+
+/* 目录 */
+.doc-toc { padding: 1em 2.5cm; background: #ffffff; }
+.toc-title { font-family: "黑体", SimHei, sans-serif; font-size: 16pt; font-weight: 700; color: #0d3b7a; margin-bottom: 0.6em; }
+.toc-list, .toc-list ol, .toc-list ul { list-style: none; list-style-type: none; padding-left: 1.5em; }
+.toc-list li { margin-bottom: 0.3em; text-indent: 0; }
+.toc-list a { color: #000000; text-decoration: none; }
+
+/* 正文 */
+.body { padding: 1.5em 2.5cm; }
+.body h2 { font-family: "黑体", SimHei, sans-serif; font-size: 15pt; font-weight: 700; color: #0d3b7a; margin-top: 1.5em; margin-bottom: 0.6em; border-bottom: 2px solid #1a5fb4; padding-bottom: 0.3em; }
+.body h3 { font-family: "黑体", SimHei, sans-serif; font-size: 13pt; font-weight: 700; color: #1a5fb4; margin-top: 1.1em; margin-bottom: 0.5em; }
+.body p { margin-bottom: 0.7em; text-indent: 2em; text-align: justify; }
+.body p.no-indent { text-indent: 0; }
+.body strong { font-weight: 700; }
+
+/* 表格 */
+table { width: 100%; border-collapse: collapse; margin: 0.8em 0 1em 0; font-size: 10.5pt; }
+th, td { border: 1px solid #c9c9c9; padding: 0.45em 0.6em; text-align: left; vertical-align: top; line-height: 1.5; }
+th { background: #e8f0fa; font-family: "黑体", SimHei, sans-serif; font-weight: 700; color: #0d3b7a; }
+tr:nth-child(even) td { background: #f7fafd; }
+.table-note { font-size: 9.5pt; color: #555555; text-indent: 0; margin-top: -0.5em; }
+
+/* 代码块 */
+pre { background: #f5f5f5; border: 1px solid #e0e0e0; border-left: 3px solid #1a5fb4; padding: 0.8em 1em; margin: 0.8em 0; font-family: "Consolas", "Courier New", monospace; font-size: 9.5pt; line-height: 1.5; overflow-x: auto; }
+code { font-family: "Consolas", "Courier New", monospace; font-size: 10pt; }
+
+/* 引用/要点块 */
+.callout { background: #f2f6fb; border-left: 4px solid #1a5fb4; padding: 0.7em 1em; margin: 0.8em 0; }
+.callout p { text-indent: 0; margin-bottom: 0.3em; }
+
+/* 附录 */
+.appendix { padding: 1.5em 2.5cm; border-top: 1px solid #c9c9c9; }
+.appendix h2 { font-family: "黑体", SimHei, sans-serif; font-size: 15pt; font-weight: 700; color: #0d3b7a; margin-top: 1.2em; margin-bottom: 0.6em; }
+</style>
+</head>
+<body>
+
+<section role="cover" class="cover">
+  <p class="cover-category">技术调研与决策报告</p>
+  <p class="cover-title">大模型推理引擎技术调研<br>与自研路线决策报告</p>
+  <p class="cover-subtitle">九轮 GitHub 深度调研 · 最终路线方案</p>
+  <div class="cover-meta">
+    <p>调研日期：2026-11-13</p>
+    <p>数据来源：GitHub API 实时采集 + 官方文档 + 论文</p>
+    <p>性质：立项决策参考</p>
+  </div>
+</section>
+
+<section role="cover">
+  <nav class="doc-toc" aria-label="文档目录">
+    <p class="toc-title">目录</p>
+    <ol class="toc-list">
+      <li><a href="#section-1">一、摘要</a></li>
+      <li><a href="#section-2">二、调研方法与范围</a>
+        <ol>
+          <li><a href="#section-2-1">2.1 数据口径</a></li>
+          <li><a href="#section-2-2">2.2 调研范围</a></li>
+          <li><a href="#section-2-3">2.3 局限声明</a></li>
+        </ol>
+      </li>
+      <li><a href="#section-3">三、市场格局</a>
+        <ol>
+          <li><a href="#section-3-1">3.1 三层分化</a></li>
+          <li><a href="#section-3-2">3.2 主流引擎对比</a></li>
+          <li><a href="#section-3-3">3.3 两个格局信号</a></li>
+        </ol>
+      </li>
+      <li><a href="#section-4">四、技术路线版图（简述）</a></li>
+      <li><a href="#section-5">五、可复用零件层</a></li>
+      <li><a href="#section-6">六、纵向范本：DeepSeek 昇腾六件套</a></li>
+      <li><a href="#section-7">七、被忽略的战场：RL 与推理的接口</a>
+        <ol>
+          <li><a href="#section-7-1">7.1 三个独立偏差源</a></li>
+          <li><a href="#section-7-2">7.2 R3 实现现状</a></li>
+          <li><a href="#section-7-3">7.3 字段级分歧</a></li>
+          <li><a href="#section-7-4">7.4 四类静默失败</a></li>
+          <li><a href="#section-7-5">7.5 成本真相</a></li>
+          <li><a href="#section-7-6">7.6 sampling mask 的配对要求</a></li>
+        </ol>
+      </li>
+      <li><a href="#section-8">八、机会评估</a>
+        <ol>
+          <li><a href="#section-8-1">8.1 已被填满的坑</a></li>
+          <li><a href="#section-8-2">8.2 三条备选路线的取舍</a></li>
+          <li><a href="#section-8-3">8.3 选中的缝隙</a></li>
+        </ol>
+      </li>
+      <li><a href="#section-9">九、最终方案</a>
+        <ol>
+          <li><a href="#section-9-1">9.1 决策</a></li>
+          <li><a href="#section-9-2">9.2 定位</a></li>
+          <li><a href="#section-9-3">9.3 四阶段实施路线</a></li>
+          <li><a href="#section-9-4">9.4 最小验证方案</a></li>
+          <li><a href="#section-9-5">9.5 验收标准与指标</a></li>
+          <li><a href="#section-9-6">9.6 风险与边界</a></li>
+        </ol>
+      </li>
+      <li><a href="#section-10">十、结论与下一步</a></li>
+      <li><a href="#section-appendix">附录：术语表与数据来源</a></li>
+    </ol>
+  </nav>
+</section>
+
+<section role="body" class="body" data-page-restart="1">
+
+<h2 id="section-1" style="page-break-before: always;">一、摘要</h2>
+<p>本报告基于九轮 GitHub 深度调研，覆盖 60 余个推理引擎与相关基础设施项目，回答一个问题：<strong>在 2026 年，一个没有大厂资源的团队，自研大模型推理引擎的正确切入点是哪里？</strong></p>
+<p>核心结论是：<strong>不自研通用推理引擎，先做 RL 训练与推理引擎之间的"数据契约适配层"。</strong></p>
+<p>理由有三。其一，通用引擎已被 vLLM（96,857★）、SGLang（38,804★）与 TensorRT-LLM 的生态壁垒锁死，自研无差异。其二，Kernel 层的极限已被 DeepSeek 的 DeepGEMM（BF16 达硬件极限 99.8%）探明，难以超越。其三，推理与 RL 训练之间至今存在一条<strong>字段级不统一的缝隙</strong>——同一份 MoE 路由数据，vLLM、SGLang、Megatron 用了三种不同 dtype 与三种不同传输格式，边界约定互不一致。这条缝隙有真实需求、有可对齐的事实标准、且工程量可控。</p>
+<p>本报告给出四阶段实施路线、50 行代码即可验证的最小闭环，以及明确的验收标准。</p>
+
+<h2 id="section-2">二、调研方法与范围</h2>
+<h3 id="section-2-1">2.1 数据口径</h3>
+<p><strong>采集方式</strong>：GitHub API 于 2026-11-13 实时采集 stars / forks / open issues / 最后提交时间 / archived 标记 / 许可证；辅以项目官方文档、README，以及 NeurIPS / SOSP / OSDI / FAST 等会议的原始论文。</p>
+<p><strong>性能数据口径</strong>：吞吐、延迟等数字来自多方公开 benchmark 与官方技术报告，<strong>仅代表量级区间</strong>。不同硬件、量化格式、序列长度分布下，结论可能反转甚至完全相反。</p>
+<h3 id="section-2-2">2.2 调研范围</h3>
+<table>
+  <tr><th>维度</th><th>覆盖内容</th></tr>
+  <tr><td>引擎本体</td><td>服务端（vLLM / SGLang / TensorRT-LLM / LMDeploy / TGI）、端侧（llama.cpp / Ollama / MLC-LLM）、多元算力（Chitu / xLLM / trnrt / vllm-ascend）、极限内存（kimi-k3-in-c / turbo-fieldfare）</td></tr>
+  <tr><td>零件层</td><td>kernel（FlashInfer / kt-kernel）、投机解码（EAGLE / speculators）、KV 量化（KVarN）、MoE 库（Tutel）、SSD 流式（inferssd / llama-modchip）</td></tr>
+  <tr><td>语言与硬件</td><td>Rust（mistral.rs / Candle）、NPU（FastFlowLM / Tengine / lemonade）、编译器（mlir-aie / TileLang）</td></tr>
+  <tr><td>RL 协同</td><td>权重同步、部分 rollout、R3 路由回放、sampling mask、数据契约</td></tr>
+</table>
+<h3 id="section-2-3">2.3 局限声明</h3>
+<p>以下内容为<strong>判断与建议</strong>，与"已验证事实"分开标注：性能对比、机会评估、实施顺序。以下内容存在<strong>不确定性</strong>：vLLM 字段仍在演进（weight_versions 仅存在于 fork）、上游协议统一进度不明。</p>
+
+<h2 id="section-3">三、市场格局</h2>
+<h3 id="section-3-1">3.1 三层分化</h3>
+<p>2026 年的推理基础设施已经分化为三层，任何新进入者都必须先明确自己属于哪一层：</p>
+<table>
+  <tr><th>层次</th><th>代表项目</th><th>定位</th></tr>
+  <tr><td>引擎层</td><td>vLLM、SGLang、TensorRT-LLM</td><td>承载模型权重、调度请求、管理 KV cache</td></tr>
+  <tr><td>编排层</td><td>NVIDIA Dynamo 1.0、llm-d（CNCF Sandbox）</td><td>在引擎之上做 PD 分离决策、多副本调度</td></tr>
+  <tr><td>KV 层</td><td>Mooncake、LMCache、NIXL</td><td>把 KV cache 从引擎解耦成独立基础设施</td></tr>
+</table>
+<p><strong>关键含义</strong>：编排层与 KV 层都不自己写引擎，而是在引擎之上/之下做差异化。这是"不重造引擎也能生存"的实证。</p>
+<h3 id="section-3-2">3.2 主流引擎对比</h3>
+<table>
+  <tr><th>引擎</th><th>Stars</th><th>架构范式</th><th>核心优势</th><th>主要缺陷</th></tr>
+  <tr><td>vLLM</td><td>96,857</td><td>分页内存管理</td><td>生态最大、模型 day-0、硬件最广、零编译</td><td>单卡吞吐非第一、代码膨胀（1 万+ open issues）</td></tr>
+  <tr><td>SGLang</td><td>38,804</td><td>前缀复用优先</td><td>RadixAttention 使 Agent/RAG 领先、约束解码最强</td><td>运维生态小、前缀不重复时优势消失</td></tr>
+  <tr><td>TensorRT-LLM</td><td>15,075</td><td>编译式 AOT</td><td>NVIDIA 上吞吐/尾延迟最强（+15~40%）</td><td>锁 NVIDIA、编译约 28 分钟、许可非标准 OSI</td></tr>
+  <tr><td>LMDeploy</td><td>8,140</td><td>手写 kernel 持久批处理</td><td>INT4 显存受限优秀、国产模型适配快</td><td>模型覆盖窄、双引擎分裂</td></tr>
+  <tr><td>llama.cpp</td><td>134,741</td><td>可移植 C/C++</td><td>硬件覆盖无敌、2-bit 可跑、零依赖</td><td>不为并发设计、KV 浪费 10-20%</td></tr>
+  <tr><td>Ollama</td><td>186,844</td><td>分发层 + 运行时管理</td><td>体验最好、开发者心智第一</td><td>本质是发行版非高性能引擎</td></tr>
+</table>
+<h3 id="section-3-3">3.3 两个格局信号</h3>
+<p><strong>其一</strong>，HuggingFace TGI 已归档（archived: true，最后提交 2026-03-21），HF 自家 Inference Endpoints 转向 vLLM。曾经的四强之一退场，说明<strong>这个领域没有"稳定胜利者"</strong>。</p>
+<p><strong>其二</strong>，DeepSeek 的 FlashMLA 放弃 Hopper 支持，只保留 Blackwell 与 Ascend 950。前沿实验室已不再把上一代 NVIDIA 芯片当作优化目标——<strong>平台押注的窗口正在移动</strong>。</p>
+
+<h2 id="section-4">四、技术路线版图（简述）</h2>
+<p>以下路线不展开，仅记录其存在与代表项目，作为"为什么不自研这些方向"的背景：</p>
+<table>
+  <tr><th>路线</th><th>代表项目</th><th>Stars</th><th>一句话定位</th></tr>
+  <tr><td>多元算力</td><td>Chitu 赤兔（清华 PACMAN）</td><td>3,000</td><td>昇腾/沐曦/海光/摩尔线程/燧原 + NVIDIA，单卡跑 DeepSeek-R1 671B</td></tr>
+  <tr><td>极限内存</td><td>kimi-k3-in-c</td><td>11,900</td><td>2.78T 参数跑在单 CPU 8.24GB 内存，纯 C99</td></tr>
+  <tr><td>存储层级延伸</td><td>inferssd / llama-modchip</td><td>1,000 / 1,200</td><td>从 SSD 流式加载专家；284B 跑在 64GB 纯 CPU</td></tr>
+  <tr><td>Rust 引擎</td><td>mistral.rs</td><td>7,600</td><td>45+ 架构、PagedAttention、单二进制、内置 agentic runtime</td></tr>
+  <tr><td>NPU</td><td>FastFlowLM / Tengine</td><td>2,000 / 4,500</td><td>AMD Ryzen AI NPU；阿里 Tengine 连 RISC-V 都支持</td></tr>
+</table>
+<p>这些路线各有真实市场，但共性是需要<strong>算子功底或厂商关系</strong>，非本方案的切入点。</p>
+
+<h2 id="section-5">五、可复用零件层</h2>
+<p><strong>造引擎已经不需要从零写。</strong>2026 年的现实是"组装 + 在一层做差异"：</p>
+<table>
+  <tr><th>零件</th><th>项目</th><th>Stars</th><th>定位</th></tr>
+  <tr><td>Attention/MoE kernel</td><td>FlashInfer</td><td>6,900</td><td>事实上的 kernel 中间层，vLLM/SGLang/TRT-LLM 都在用</td></tr>
+  <tr><td>CPU 端算子</td><td>kt-kernel / KTransformers</td><td>19,700</td><td>热专家在 GPU、冷专家在 CPU，NUMA 感知</td></tr>
+  <tr><td>投机解码</td><td>EAGLE / speculators</td><td>2,600 / 955</td><td>算法可插拔化是趋势</td></tr>
+  <tr><td>KV 量化</td><td>KVarN（华为）</td><td>520</td><td>免校准、一个开关、3-5 倍上下文</td></tr>
+  <tr><td>MoE 库</td><td>Tutel（微软）</td><td>1,000</td><td>FP8/NVFP4/MXFP4 全覆盖</td></tr>
+</table>
+<div class="callout"><p><strong>结论</strong>：自研的应该只有<strong>调度器与状态管理</strong>——那是唯一能形成差异的地方。</p></div>
+
+<h2 id="section-6">六、纵向范本：DeepSeek 昇腾六件套</h2>
+<p>2026-09-30，DeepSeek 开源了整套昇腾软件栈（MIT），六个组件，是"自研引擎"最完整的范本：</p>
+<table>
+  <tr><th>组件</th><th>关键数据</th></tr>
+  <tr><td>TileLang（昇腾版）</td><td>kernel 语言，直接生成 Ascend C，同一套代码编译到 GPU 与 NPU</td></tr>
+  <tr><td>DeepGEMM-Ascend</td><td>BF16 矩阵乘达硬件上限 99.8%、FP8 达 99.5%</td></tr>
+  <tr><td>FlashMLA</td><td>prefill 95% 峰值、decode 83%；弃 Hopper，留 Blackwell + Ascend 950</td></tr>
+  <tr><td>DeepEP-Ascend</td><td>EP8 下 dispatch 373-375 GB/s，约 90-95% 物理带宽上限</td></tr>
+  <tr><td>TileKernels / DeepSelect</td><td>向量/内存算子；top-k 选择</td></tr>
+</table>
+<p>配套硬件：昇腾 950DT（144GB 自研内存、4TB/s、1 PFLOPS FP8）；SuperPoD Flex（128 卡单层 3.2Tbps，可扩 256K 卡）。</p>
+<p><strong>重要边界（已验证事实）</strong>：DeepEP-Ascend 的带宽数据来自 DeepSeek 提供的 PoC HDK（非公开发售版本），其 README 明确提示早期 PoC 硬件可能更低，官方基线应以华为商用品为准。</p>
+
+<h2 id="section-7">七、被忽略的战场：RL 与推理的接口（本报告重点）</h2>
+<h3 id="section-7-1">7.1 三个独立偏差源</h3>
+<p>RL（强化学习）训练不稳定，有三个<strong>互相独立</strong>的来源，各有一个对应机制，缺一不可：</p>
+<table>
+  <tr><th>偏差源</th><th>表现</th><th>修法</th></tr>
+  <tr><td>路由偏差</td><td>MoE 推理与训练为同一 token 选不同专家</td><td>R3（Router Replay）</td></tr>
+  <tr><td>动作空间偏差</td><td>top-p 截断使采样分布 ≠ 训练全词表</td><td>sampling mask</td></tr>
+  <tr><td>打分偏差</td><td>推理与训练 logprob 因 kernel/精度/策略滞后不相等</td><td>score centering</td></tr>
+</table>
+<div class="callout"><p><strong>社区最常见的错误是只修一个就宣布解决，另外两个仍在悄悄污染梯度。</strong></p></div>
+<h3 id="section-7-2">7.2 R3 实现现状</h3>
+<table>
+  <tr><th>实现方</th><th>状态</th></tr>
+  <tr><td>vLLM</td><td>--enable-return-routed-experts 已上线，返回 routed_experts（[gen_len, layers, top_k]，dtype uint8/uint16）与 prompt_routed_experts</td></tr>
+  <tr><td>NeMo RL v0.7</td><td>PR #2590 实现 R3（vLLM 路线），约 4059 行，支持 Sync/Async RL</td></tr>
+  <tr><td>阿里 ROLL</td><td>也实现 R3，但走 SGLang 路线，明确不支持 vLLM rollout</td></tr>
+  <tr><td>Megatron-LM</td><td>PR #79 给出最细边界处理，未合入主干</td></tr>
+  <tr><td>论文</td><td>R3 = arXiv:2606.02437</td></tr>
+</table>
+<h3 id="section-7-3">7.3 字段级分歧——协议不统一的最硬证据</h3>
+<p>同一份语义数据，三种 dtype、三种传输格式：</p>
+<table>
+  <tr><th>实现</th><th>dtype</th><th>体积（同一数据）</th></tr>
+  <tr><td>vLLM 官方</td><td>uint8（≤256 专家）/ uint16</td><td>1×</td></tr>
+  <tr><td>部分 fork 文档</td><td>int16</td><td>2×</td></tr>
+  <tr><td>Miles 实测</td><td>int32</td><td>2-4×</td></tr>
+</table>
+<p><strong>32K token、60 层、top_k=8 的一条 rollout 轨迹，路由数据就约 60MB（int32）。</strong>统一 dtype 后同样数据可降到 15MB。</p>
+<h3 id="section-7-4">7.4 四类静默失败（不报错，只是数据不对）</h3>
+<p>这是实现协议时最危险、最该先处理的坑：</p>
+<p><strong>其一，CUDA graph 与 NCCL 死锁</strong>：只有 rank 0 持有 device buffer 会导致各 rank 代码路径不同、图结构不对称，collective 中偶发 hang。解法是所有 rank 都分配真实 buffer。</p>
+<p><strong>其二，被抢占的请求静默丢路由</strong>：host cache 中已累积的路由被丢弃且不发出，消费方只看到 None，无任何信号。</p>
+<p><strong>其三，异步调度下 EOS 静默丢路由</strong>：stop 判断读到 placeholder -1。</p>
+<p><strong>其四，流式不可用 / Rust HTTP 前端永不返回该字段</strong>。</p>
+<h3 id="section-7-5">7.5 成本真相</h3>
+<table>
+  <tr><th>指标</th><th>数值</th></tr>
+  <tr><td>R3 吞吐开销</td><td>约 -2%（ISL/OSL=1024）</td></tr>
+  <tr><td>R3 显存开销</td><td>约 14MB/GPU（40 层/8192 token/top-22）</td></tr>
+  <tr><td>R3 精度影响</td><td>零差异（GSM8K pass@1 完全一致）</td></tr>
+  <tr><td>传输体积</td><td>约 60MB/条轨迹（32K token）</td></tr>
+  <tr><td>sampling mask 吞吐代价</td><td>num_sampler_logprobs=8 且单 API server 时减半；加 8 个 API server 后 &lt;3%</td></tr>
+</table>
+<p><strong>关键认知</strong>：R3 的那 2% 吞吐不是成本，60MB 传输才是；mask 的成本不在显存，而在 CPU 序列化。</p>
+<h3 id="section-7-6">7.6 sampling mask 的配对要求</h3>
+<p>--return-sampling-mask 必须与 --logprobs-mode processed_logprobs <strong>同时使用</strong>。只开 mask 不改 logprobs 模式，返回的 logprob 仍在全词表归一化，而 mask 定义的是核内支撑集——分子分母不在同一空间，比率照样有偏。训练侧还需：</p>
+<pre><code>keep = torch.zeros(vocab_size, dtype=torch.bool); keep[mask_ids] = True
+log_prob = log_softmax(logits.masked_fill(~keep, -inf))[sampled_token_id]</code></pre>
+
+<h2 id="section-8">八、机会评估</h2>
+<h3 id="section-8-1">8.1 已被填满的坑（不要碰）</h3>
+<p>PagedAttention 式 KV 管理、连续批处理、OpenAI 兼容协议、基础量化（AWQ/GPTQ/FP8）、单点投机解码——这些是<strong>入场券，不是差异点</strong>。</p>
+<h3 id="section-8-2">8.2 三条备选路线的取舍（判断）</h3>
+<table>
+  <tr><th>路线</th><th>为什么不选</th></tr>
+  <tr><td>约束型引擎（国产芯片/端侧）</td><td>需算子功底与厂商关系，Chitu 已占位</td></tr>
+  <tr><td>调度层创新（Agent DAG）</td><td>工程量小但缺场景验证，且尚无明确需求方</td></tr>
+  <tr><td>做零件（kernel/量化）</td><td>DeepGEMM 的 99.8% 无法超越</td></tr>
+</table>
+<h3 id="section-8-3">8.3 选中的缝隙</h3>
+<p><strong>跨引擎的 RL 数据契约适配层</strong>。理由：需求真实（16 个开源 RL 库各自造轮子）、有可对齐的事实标准（vLLM 的字段）、工程量可控、且两派已分叉（NeMo RL 走 vLLM，ROLL 走 SGLang 且互不兼容）。</p>
+
+<h2 id="section-9">九、最终方案</h2>
+<h3 id="section-9-1">9.1 决策：先实现协议，不定义协议</h3>
+<p><strong>理由</strong>：定义协议需要生态号召力，实现协议可在实践中积累话语权；且 vLLM 的 routed_experts / SamplingMask 已是事实标准，与它对齐的成本远低于另起一套。</p>
+<h3 id="section-9-2">9.2 定位</h3>
+<p>跨引擎的 RL 数据契约适配层——统一 routed_experts 与 sampling_mask 的 dtype、形状、边界约定，并提供一致性校验。</p>
+<h3 id="section-9-3">9.3 四阶段实施路线</h3>
+<table>
+  <tr><th>阶段</th><th>周期</th><th>目标</th></tr>
+  <tr><td>阶段一</td><td>约 1 周</td><td>在 vLLM 上跑通 R3 + sampling mask 的最小验证</td></tr>
+  <tr><td>阶段二</td><td>1-2 周</td><td>dtype 归一化 + 三类边界处理（末 token 无路由 / 中止为 null / 不可映射 -1 哨兵）</td></tr>
+  <tr><td>阶段三</td><td>2-3 周</td><td>vLLM / SGLang 双引擎适配</td></tr>
+  <tr><td>阶段四</td><td>持续</td><td>一致性校验工具与指标</td></tr>
+</table>
+<h3 id="section-9-4">9.4 最小验证方案（50 行代码可验证）</h3>
+<p>第一步，启动服务并保证批不变性：vllm serve &lt;moe-model&gt; --enable-return-routed-experts，同时设环境变量 VLLM_BATCH_INVARIANT=1。</p>
+<p>第二步，取一条 routed_experts，断言 shape[0] == prompt_len + gen_len - 1（末 token 无路由）。</p>
+<p>第三步，训练侧把同一批 token 的专家强制成该索引。</p>
+<p>第四步，对比 logprob 差异：<strong>归零则契约成立；不归零则已定位到第一个要修的点。</strong></p>
+<h3 id="section-9-5">9.5 验收标准与指标</h3>
+<p>logprob 差异归零或低于阈值；unmappable_frac 可观测（不可映射 token 比例）；抢占场景能被<strong>显式检测</strong>，而非静默丢数据。</p>
+<h3 id="section-9-6">9.6 风险与边界</h3>
+<p>vLLM 字段仍在演进（weight_versions 仅存在于 fork），上游合并状态不确定；PD 分离与 R3 目前不兼容（Nixl/Mooncake 等 KV connector 被拒）；若上游统一协议，适配层价值下降——<strong>应对</strong>：把适配层做成可被上游吸收的形态。</p>
+
+<h2 id="section-10">十、结论与下一步</h2>
+<p>九轮调研把问题收敛到一句话：<strong>在约束条件里做引擎，比在无约束条件里做引擎容易十倍；而当前最真实的约束条件是"推理与训练之间没有统一的契约"。</strong></p>
+<p>未来 30 天的三个动作：</p>
+<p>1. 用 50 行最小验证脚本在 vLLM 上跑通 R3，确认 logprob 差异能否归零。</p>
+<p>2. 写 dtype 归一化层，覆盖 uint8/uint16/int32 三种输入。</p>
+<p>3. 处理三类静默失败，重点是被抢占请求的显式检测。</p>
+
+<div class="appendix">
+<h2 id="section-appendix">附录：术语表与数据来源</h2>
+<p class="no-indent"><strong>术语表</strong></p>
+<table>
+  <tr><th>术语</th><th>含义</th></tr>
+  <tr><td>R3（Router Replay）</td><td>训练前向重放 rollout 时选中的 MoE 专家索引</td></tr>
+  <tr><td>PD 分离</td><td>把 prefill 与 decode 拆到不同 GPU 池</td></tr>
+  <tr><td>EP（Expert Parallel）</td><td>专家并行，MoE 的分布式策略</td></tr>
+  <tr><td>goodput</td><td>SLO 约束下的有效吞吐，区别于峰值吞吐</td></tr>
+  <tr><td>RadixAttention</td><td>SGLang 的基数树前缀复用</td></tr>
+  <tr><td>sampling mask</td><td>每个生成 token 通过 top-k/top-p 后存活的词表 ID 集合</td></tr>
+  <tr><td>score centering</td><td>训练侧减去采样器下 logprob 的期望</td></tr>
+</table>
+<p class="no-indent"><strong>数据来源</strong></p>
+<p class="no-indent">· GitHub API（2026-11-13）：各项目 stars / forks / open issues / archived / license</p>
+<p class="no-indent">· vLLM 官方文档：docs/training/routed_experts.md、docs/training/sampling_mask.md、examples/rl/routed_experts_e2e.py</p>
+<p class="no-indent">· NeMo RL v0.7 Release Notes（Router Replay / R3）</p>
+<p class="no-indent">· 阿里 ROLL 文档：User Guides &gt; Advanced Features &gt; router_replay</p>
+<p class="no-indent">· 论文：R3（arXiv:2606.02437）、PagedAttention（SOSP'23）、Sarathi-Serve（OSDI'24）、DistServe（OSDI'24）、Mooncake（FAST'25）</p>
+</div>
+
+</section>
+</body>
+</html>
