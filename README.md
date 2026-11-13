@@ -12,6 +12,7 @@
 ```
 .
 ├── r3-adapter/                     # R3 路由契约适配层（核心）
+│   ├── env_check.py                # ★ 环境自检（跑之前先查这台机器行不行）
 │   ├── r3_contract.py              # 可复用校验库（5 个校验原语）
 │   ├── test_r3_contract.py         # unittest 测试套件（11 项）
 │   ├── contract_check.py           # 纯逻辑契约测试（无需 GPU）
@@ -43,6 +44,34 @@
 | 打分偏差 | score centering 不同 | 归一化对齐 |
 
 ## 快速开始
+
+### 0. 先自检（强烈建议，30 秒）
+
+```bash
+cd r3-adapter
+python env_check.py --model ~/models/Qwen1.5-MoE-A2.7B-Chat-GPTQ-Int4
+```
+
+**这一步能省下 2 小时。** `env_check.py` 的每一条检查都对应下面「踩坑记录」里的一个真实坑：
+vLLM 版本、CUDA 架构、空闲显存、`libnvrtc-builtins`、`Python.h`、pinned memory、模型显存预算。
+
+输出示例（真实结果）：
+
+```
+[GPU 硬件]
+  [ OK ] GPU          NVIDIA GeForce RTX 5060 Laptop GPU
+  [ OK ] 总显存        7.96 GiB
+  [ OK ] 计算能力      sm_120
+
+[内存]
+  [FAIL] pinned memory  不可用：RuntimeError
+                        修复：WSL2 的已知限制。UVA offload 会静默失效
+
+[模型适配]
+  [FAIL] 显存预算        需要 8.34 GiB vs 可用 6.31 GiB，缺口 2.03 GiB
+
+结论：这台机器跑不了 R3 验证
+```
 
 ### 1. 纯逻辑验证（无需 GPU，10 秒）
 
