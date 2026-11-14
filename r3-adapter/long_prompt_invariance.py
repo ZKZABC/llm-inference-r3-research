@@ -217,6 +217,13 @@ def main() -> int:
     print("结论")
     print("=" * 70)
 
+    # 0 个成功对比时绝不能报"成立"——那是假阳性（服务没起也会全失败）。
+    if not results:
+        print("  没有任何成功的对比（服务未起 / 无路由数据）。")
+        print("  → 无法判定批不变性。先确认 vLLM 存活且返回 routed_experts。")
+        print()
+        return 1
+
     if n_fail == 0:
         print("  所有长度上，加一条无关 prompt 都没有改变 A 的路由。")
         print("  → 当前配置下批不变性成立。")
