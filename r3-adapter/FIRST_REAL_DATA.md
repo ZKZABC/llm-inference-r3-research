@@ -8,10 +8,10 @@
 
 | 项目 | 值 |
 |---|---|
-| 平台 | ModelScope Notebook（魔搭免费实例） |
-| 硬件 | AMD GPU，**192 GB 显存**，23 核 / 200 GB 内存 |
-| 计算栈 | **ROCm 7.2.3**（不是 CUDA） |
-| vLLM | 0.33.0（ROCm wheel） |
+| 平台 | ModelScope Notebook（魔搭免费 GPU 实例，**36 小时额度**） |
+| 硬件 | NVIDIA GPU，**24 GB 显存**，8 核 / 32 GB 内存 |
+| 计算栈 | **CUDA 13.0**（torch 2.14.0+cu130） |
+| vLLM | 0.33.0（PyPI 官方 wheel，非 ROCm 版） |
 | 模型 | `qwen/Qwen1.5-MoE-A2.7B-Chat-GPTQ-Int4`（7.84 GiB） |
 | 启动方式 | `vllm serve`（HTTP API，非 Python SDK） |
 
@@ -68,7 +68,7 @@ npy 头部（base64 解码后）：
 - **Router Replay 不能依赖"热门/冷门专家"做缓存分层**——全部 60 个都必须可用
 - 也解释了为什么 CPU offload 在 MoE 上收益有限：**访问模式均匀，没有局部性**
 
-### 2. ROCm 上也能拿到 `routed_experts`（推翻了此前预判）
+### 2. 官方文档说"必须 V2 runner"，实测 V1 也能工作
 
 启动日志里有这一行：
 
@@ -77,9 +77,21 @@ WARNING: Model Runner V2 does not yet support routed experts capture;
 using the V1 model runner instead.
 ```
 
-**读起来像"功能缺失"，实际含义相反**：V2 还没接这个功能，所以回退到 **V1——而 V1 是功能完整的实现**。
+而 vLLM 官方文档 `docs/training/routed_experts.md` 写的是：
 
-> **教训：警告文案 ≠ 实际行为。** "using V1 instead" 是切换到可用实现的兜底，不是降级。
+> Startup fails with a `ValueError` **unless Model Runner V2 is used**
+
+**实测结果与文档相反**：vLLM 自己回退到 V1，`routed_experts` 正常返回，数据完整且符合契约。
+
+可能的解释：
+
+- 文档描述的是 V2 完成后的目标状态，当前 V1 是唯一可用路径
+- 或者 `VLLM_USE_V2_MODEL_RUNNER=1` 的强制校验只在某些分支/版本生效
+- 或者两者并存：V2 未接入时静默回退，而不是报错
+
+> **教训：文档里的"必须"和代码的实际行为，是两件需要分别验证的事。**
+> 这个案例里，如果只信文档，会得出"我的环境跑不了"的错误结论；
+> 如果只信日志警告，会得出"功能缺失"的错误结论。**只有实际跑一遍才知道。**
 
 ### 3. `spawn` 模式下不能用 `python - << EOF`
 

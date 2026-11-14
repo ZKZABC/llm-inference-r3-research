@@ -46,7 +46,7 @@
 
 ## 第一条真实数据（2026-11-14 实测）
 
-在 ModelScope 的 AMD GPU 实例（**192 GB 显存 / ROCm 7.2.3**）上跑通：
+在 ModelScope 的 NVIDIA GPU 实例（**24 GB 显存 / CUDA 13.0**）上跑通：
 
 ```python
 shape  = (8, 24, 4)     # 8 行 = 1 prompt + 8 gen − 1（末 token 无路由）
