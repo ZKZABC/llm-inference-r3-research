@@ -11,9 +11,11 @@
 
 ```
 .
+├── R3_VERIFICATION_REPORT.md       # 条件①：推理侧路由可复现
+├── R3_REPLAY_PROOF.md              # ★ 条件②：训练侧回放精确（bit-identical）
 ├── r3-adapter/                     # R3 路由契约适配层（核心）
 │   ├── env_check.py                # ★ 第 1 类：环境自检（跑之前先查这台机器行不行）
-│   ├── r3_contract.py              # ★ 第 2 类：可复用校验库（5 个校验原语）
+│   ├── r3_contract.py              # ★ 第 2 类：可复用校验库（6 个校验原语）
 │   ├── silent_degradation.py       # ★ 第 3 类：静默降级检测（日志说做了但没生效）
 │   ├── determinism/                # ★ 第 4 类：可复现性门禁（跨 batch / 跨路径）
 │   │   ├── gemm_gate.py            #   gemv/gemm 路径分叉
@@ -51,6 +53,21 @@
 | 路由偏差 | 推理与训练的专家选择不同 | R3 记录 + Router Replay |
 | 动作空间偏差 | 采样 mask 不一致 | sampling mask 对齐 |
 | 打分偏差 | score centering 不同 | 归一化对齐 |
+
+### 契约的两个必要条件（均已验证）
+
+R3 成立需要两件**互相独立**的事，少任何一个都不成立：
+
+| # | 条件 | 验证 | 结果 |
+|---|---|---|---|
+| ① | 推理侧记录的路由可复现 | 同 prompt 跨 batch 对比 | ✅ 开 `VLLM_BATCH_INVARIANT=1` 后 **0/768** |
+| ② | 训练侧能精确回放该路由 | 注入自己产生的路由，看输出是否变 | ✅ **bit-identical**（24 层 × 5 token） |
+
+第 ① 条见 [`R3_VERIFICATION_REPORT.md`](R3_VERIFICATION_REPORT.md)，
+第 ② 条见 [`R3_REPLAY_PROOF.md`](R3_REPLAY_PROOF.md)。
+
+**②的语义**：不是「让训练侧的 router 算出同样结果」，而是**跳过 router 的选择，直接用记录的 top-k 索引**；
+权重仍从本次 logits 重新 gather（连权重一起注入就绕过了 softmax，测不出真实差异）。
 
 ## 第一条真实数据（2026-11-14 实测）
 
