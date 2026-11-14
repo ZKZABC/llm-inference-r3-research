@@ -166,13 +166,30 @@ def run_with_hidden(model, ids, routes):
     return out.logits, per_layer
 
 
+PROMPTS = [
+    "The capital of France is",
+    "def quicksort(arr):\n    if len(arr) <= 1:\n        return arr",
+    "请解释一下量子纠缠的基本原理",
+    "SELECT u.name, COUNT(o.id) FROM users u LEFT JOIN orders o ON u.id = o.user_id",
+    "The patient presented with acute abdominal pain and fever. The differential diagnosis includes",
+    "证明：对于任意正整数 n，n^3 - n 能被 6 整除。证明过程如下：",
+    "写一首关于秋天的五言绝句，要求押平声韵：",
+    "The transformer architecture relies on self-attention mechanisms that compute",
+    "将下面这段话翻译成英文：人工智能正在改变我们的生活方式",
+    "Revenue recognition under ASC 606 requires the entity to identify",
+    "机器学习模型的泛化能力取决于训练数据的分布是否能够代表真实场景",
+    "fn main() { let mut v: Vec<i32> = Vec::new(); v.push(1); println!(\"{:?}\", v); }",
+]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="http://localhost:8000")
     ap.add_argument("--port", type=int, default=None)
     ap.add_argument("--model-dir", default="/mnt/workspace/model")
     ap.add_argument("--model-name", default="")
-    ap.add_argument("--prompt", default="The capital of France is")
+    ap.add_argument("--prompt", default=None, help="只跑这一条；不给则跑内置 12 条")
+    ap.add_argument("--prompts-file", default=None)
     args = ap.parse_args()
 
     host = f"http://localhost:{args.port}" if args.port else args.host
@@ -183,96 +200,131 @@ def main() -> int:
         print(f"需要 gptqmodel: {e}")
         return 2
 
+    prompts = [args.prompt] if args.prompt else PROMPTS
+    if args.prompts_file:
+        with open(args.prompts_file, encoding="utf-8") as f:
+            prompts = [ln.strip() for ln in f if ln.strip()]
+
     model_name = resolve_model(host, args.model_name)
     print("=" * 70)
-    print("误差传播曲线")
+    print("误差传播曲线 · 多样本")
     print("=" * 70)
-    print(f"\n  prompt   {args.prompt!r}")
-    print(f"  vLLM     {host}")
+    print(f"\n  vLLM     {host}")
+    print(f"  prompts  {len(prompts)}")
 
-    print(f"\n加载模型（约 1 分钟）...")
+    print("\n加载模型（约 1 分钟）...")
     gm = GPTQModel.load(args.model_dir, device="cpu")
     tm = gm.model.eval()
     tok = getattr(gm, "tokenizer", None)
     if tok is None:
         from transformers import AutoTokenizer
         tok = AutoTokenizer.from_pretrained(args.model_dir, trust_remote_code=True)
-
-    ids = tok(args.prompt, return_tensors="pt")["input_ids"]
     k = int(block_attr(tm.model.layers[0].mlp, "top_k", 4))
-    print(f"  完成：{len(tm.model.layers)} 层，{len(ids[0])} token，top_k={k}")
+    print(f"  完成：{len(tm.model.layers)} 层，top_k={k}")
 
-    rv = vllm_routes(host, model_name, args.prompt)
-    print(f"\n  vLLM 路由 shape={rv.shape}")
+    curves, ratios, tok_counts = [], [], []
+    is_emb = None
 
-    n_tok = len(ids[0])
-    if rv.shape[0] != n_tok:
-        print(f"\n  [警告] vLLM 路由 {rv.shape[0]} 行 != token {n_tok} 个")
-        n = min(rv.shape[0], n_tok)
-        rv = rv[:n]
-        ids = ids[:, :n]
-        print(f"  截断到 {n} 个 token 后继续")
+    print("\n逐 prompt")
+    print("─" * 70)
+    for idx, p in enumerate(prompts):
+        tag = p[:34].replace("\n", " ")
+        try:
+            rv = vllm_routes(host, model_name, p)
+            ids = tok(p, return_tensors="pt")["input_ids"]
+            n_tok = len(ids[0])
 
-    print("\n跑两次前向（原始 / 注入 vLLM 路由）")
-    logits_o, h_o = run_with_hidden(tm, ids, None)
-    logits_i, h_i = run_with_hidden(tm, ids, routes=rv)
+            if rv.shape[0] != n_tok:
+                n = min(rv.shape[0], n_tok)
+                rv = rv[:n]
+                ids = ids[:, :n]
 
-    # 自检：per_layer[0] 到底是 layer0 的输出，还是 embedding？
-    # 实测发现 L0 差异恒为 0，两个不同引擎不可能 bit-identical，
-    # 所以更可能是 hook 抓到了 embedding。
-    with torch.no_grad():
-        emb = tm.model.embed_tokens(ids).float()
-    is_emb = h_o[0].shape == emb.shape and torch.equal(h_o[0], emb)
+            _, h_o = run_with_hidden(tm, ids, None)
+            _, h_i = run_with_hidden(tm, ids, rv)
+
+            if is_emb is None:
+                with torch.no_grad():
+                    emb = tm.model.embed_tokens(ids).float()
+                is_emb = h_o[0].shape == emb.shape and torch.equal(h_o[0], emb)
+
+            rel = []
+            for i in range(len(h_o)):
+                d = (h_o[i] - h_i[i]).abs().max().item()
+                s = h_o[i].abs().max().item()
+                rel.append(d / max(s, 1e-9))
+
+            curves.append(rel)
+            q = max(1, len(rel) // 4)
+            r = float(np.mean(rel[-q:]) / max(np.mean(rel[:q]), 1e-12))
+            ratios.append(r)
+            tok_counts.append(n_tok)
+            print(f"  [{idx + 1:>2}/{len(prompts)}] {n_tok:>3} tok  ratio={r:>7.1f}x  {tag}")
+        except Exception as e:
+            print(f"  [{idx + 1:>2}/{len(prompts)}] 失败 {type(e).__name__}: {str(e)[:44]}")
+
+    if not curves:
+        print("\n没有成功的数据。")
+        return 1
+
+    C = np.array(curves)
+    mean_curve = C.mean(axis=0)
+    med_curve = np.median(C, axis=0)
+
+    print("\n" + "=" * 70)
+    print("汇总")
+    print("=" * 70)
+    print(f"  成功 prompt   {len(curves)}/{len(prompts)}")
+    print(f"  总 token      {sum(tok_counts)}")
+
     if is_emb:
         print("\n  [注意] per_layer[0] 等于 embedding —— 层号需整体减 1")
-        print("         register_forward_hook 抓到的是该层的输入，不是输出")
     else:
         print("\n  [自检] per_layer[0] 不是 embedding，层号按原样理解")
 
-    print("\n逐层 hidden 差异")
-    print("─" * 70)
-    print(f"  {'层':<5} {'max|Δh|':>12} {'max|h|':>12} {'相对':>10}  趋势")
-    print("  " + "-" * 62)
+    rs = np.array(ratios)
+    print(f"\n  各 prompt 的后/前 1/4 比值：")
+    print(f"    中位数 {np.median(rs):.1f}x   最小 {rs.min():.1f}x   最大 {rs.max():.1f}x")
+    print(f"    均值 {rs.mean():.1f}x ± {rs.std():.1f}x")
 
-    rel_list = []
-    for i in range(len(h_o)):
-        d = (h_o[i] - h_i[i]).abs().max().item()
-        scale = h_o[i].abs().max().item()
-        rel = d / max(scale, 1e-9)
-        rel_list.append(rel)
-        bar = "█" * min(30, int(rel * 300))
+    print(f"\n  平均相对差异曲线（{len(mean_curve)} 层）：")
+    print(f"  {'层':<5} {'均值':>12} {'中位数':>12}  趋势")
+    print("  " + "-" * 58)
+    peak = max(mean_curve.max(), 1e-12)
+    for i, v in enumerate(mean_curve):
+        bar = "█" * min(30, int(v / peak * 30))
         label = f"L{i}" if not is_emb else f"L{i - 1}*"
-        print(f"  {label:<5} {d:>12.3e} {scale:>12.3e} {rel:>9.2e}  {bar}")
+        print(f"  {label:<5} {v:>12.3e} {med_curve[i]:>12.3e}  {bar}")
 
-    d_logits = (logits_o - logits_i).abs().max().item()
-    print(f"\n  最终 logits 差异  {d_logits:.3e}")
+    n = len(mean_curve)
+    q = max(1, n // 4)
+    first = float(np.mean(mean_curve[:q]))
+    last = float(np.mean(mean_curve[-q:]))
+    overall = last / max(first, 1e-12)
 
     print("\n" + "=" * 70)
     print("结论")
     print("=" * 70)
+    print(f"  前 1/4 层平均  {first:.3e}")
+    print(f"  后 1/4 层平均  {last:.3e}")
+    print(f"  整体比值       {overall:.1f}x（单条中位数 {np.median(rs):.1f}x）")
 
-    n = len(rel_list)
-    first_q = float(np.mean(rel_list[: n // 4]))
-    last_q = float(np.mean(rel_list[-n // 4 :]))
-    ratio = last_q / max(first_q, 1e-12)
-    print(f"  前 1/4 层平均相对差异  {first_q:.3e}")
-    print(f"  后 1/4 层平均相对差异  {last_q:.3e}")
-    print(f"  比值                   {ratio:.2f}x")
-
-    if ratio > 2.0:
+    if overall > 2.0:
         print("\n  → 单调上升，符合「误差累积」假设 A")
-        print("    浅层路由差异被放大到深层。")
         print("    含义：R3 必须全层修，少修一层后面全被污染。")
-    elif ratio < 1.3:
+    elif overall < 1.3:
         print("\n  → 基本持平，符合「深层 router 更敏感」假设 B")
-        print("    hidden 差异没有放大，但同样的差异在深层引起更多翻转。")
-        print("    含义：可以对深层单独加精度，浅层可放宽。")
+        print("    含义：深层可单独加精度，浅层可放宽。")
     else:
         print("\n  → 介于两者之间，两个因素都有贡献。")
 
-    print("\n  注意：这个实验只用了 1 条 prompt，趋势需多样本确认。")
-    if is_emb:
-        print("  另外：层号已按 embedding 自检结果标注，带 * 的行是调整后的。")
+    # 稳健性：多少条 prompt 单独看也是「累积」
+    n_up = int((rs > 2.0).sum())
+    print(f"\n  稳健性：{n_up}/{len(rs)} 条 prompt 单独看也 >2x")
+    if n_up >= len(rs) * 0.7:
+        print("  → 趋势在所有样本上一致，可信")
+    else:
+        print("  → 样本间差异较大，结论需更多数据")
+
     print()
     return 0
 
