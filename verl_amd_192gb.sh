@@ -42,6 +42,15 @@ echo "== 检查 verl 安装计划 =="
 pip install --dry-run verl 2>&1 | tee /tmp/verl_amd_pip.txt || true
 python r3-adapter/silent_degradation.py --pip-plan /tmp/verl_amd_pip.txt || {
   echo "verl 会破坏 ROCm torch/vllm，停止。请用 verl 官方 ROCm docker 或隔离 venv。"; exit 1; }
+# gate 通过才真装
+python -c "import verl" 2>/dev/null || pip install verl
+
+# 2.5) 备数据（GSM8K）。verl pip 包不含 examples，需浅克隆源码取预处理脚本。
+DATA=${DATA:-$HOME/data/gsm8k}
+if [ ! -f "$DATA/train.parquet" ]; then
+  [ -d verl_src ] || git clone --depth 1 https://github.com/volcengine/verl verl_src
+  python verl_src/examples/data_preprocess/gsm8k.py --local_dir "$DATA"
+fi
 
 # 3) ROCm 单卡集合通信保险
 export RCCL_MSCCL_ENABLE=0 RCCL_MSCCLPP_ENABLE=0
@@ -54,8 +63,8 @@ fi
 echo "== GRPO (FULL=$FULL, 1 epoch, batch 8) =="
 python3 -m verl.trainer.main_ppo \
   algorithm.adv_estimator=grpo \
-  data.train_files=${DATA:-data/gsm8k/train.parquet} \
-  data.val_files=${DATA:-data/gsm8k/test.parquet} \
+  data.train_files="$DATA/train.parquet" \
+  data.val_files="$DATA/test.parquet" \
   data.train_batch_size=8 \
   data.max_prompt_length=256 data.max_response_length=256 \
   actor_rollout_ref.model.path="$MODEL_DIR" \
