@@ -34,7 +34,15 @@ PROMPTS = [
     "The capital of France is",
     "def quicksort(arr):\n    if len(arr) <= 1:\n        return arr",
     "请解释一下量子纠缠的基本原理",
-    "SELECT u.name, COUNT(o.id) FROM users u LEFT JOIN orders o",
+    "SELECT u.name, COUNT(o.id) FROM users u LEFT JOIN orders o ON u.id = o.user_id",
+    "The patient presented with acute abdominal pain and fever. The differential diagnosis includes",
+    "证明：对于任意正整数 n，n^3 - n 能被 6 整除。证明过程如下：",
+    "写一首关于秋天的五言绝句，要求押平声韵：",
+    "The transformer architecture relies on self-attention mechanisms that compute",
+    "将下面这段话翻译成英文：人工智能正在改变我们的生活方式",
+    "Revenue recognition under ASC 606 requires the entity to identify",
+    "机器学习模型的泛化能力取决于训练数据的分布是否能够代表真实场景",
+    "fn main() { let mut v: Vec<i32> = Vec::new(); v.push(1); println!(\"{:?}\", v); }",
 ]
 
 
@@ -217,9 +225,13 @@ def main() -> int:
     print(f"  总槽位       {total}")
     print(f"  不一致槽位   {nbad}")
     print(f"  一致率       {agree:.4%}")
+    se = (agree * (1 - agree) / max(total, 1)) ** 0.5
+    print(f"  95% 置信区间 {max(0.0, agree - 1.96 * se):.2%} – {min(1.0, agree + 1.96 * se):.2%}")
 
     per_layer = 1.0 - bad.mean(axis=0)
-    print("\n  逐层一致率：")
+    n_tok = V.shape[0]
+    print(f"\n  逐层一致率（每层 {n_tok} token × {k} 专家 = {n_tok * k} 槽位，")
+    print(f"  单个槽位权重 {1.0 / max(n_tok * k, 1):.2%}）：")
     for i, a in enumerate(per_layer):
         bar = "█" * int(a * 30) + "░" * (30 - int(a * 30))
         print(f"    L{i:<2d} {bar} {a:>7.2%}")
