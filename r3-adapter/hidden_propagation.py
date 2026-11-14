@@ -223,6 +223,7 @@ def main() -> int:
     print(f"  完成：{len(tm.model.layers)} 层，top_k={k}")
 
     curves, ratios, tok_counts = [], [], []
+    abs_curves = []
     is_emb = None
 
     print("\n逐 prompt")
@@ -248,17 +249,23 @@ def main() -> int:
                 is_emb = h_o[0].shape == emb.shape and torch.equal(h_o[0], emb)
 
             rel = []
+            abs_diff = []
             for i in range(len(h_o)):
                 d = (h_o[i] - h_i[i]).abs().max().item()
                 s = h_o[i].abs().max().item()
+                abs_diff.append(d)
                 rel.append(d / max(s, 1e-9))
 
             curves.append(rel)
+            abs_curves.append(abs_diff)
+            # 前 1/4 接近 0 时比值会爆炸（实测出现过 1.1e10x），加下限保护
             q = max(1, len(rel) // 4)
-            r = float(np.mean(rel[-q:]) / max(np.mean(rel[:q]), 1e-12))
+            base = float(np.mean(rel[:q]))
+            r = float(np.mean(rel[-q:]) / base) if base > 1e-10 else float("nan")
             ratios.append(r)
             tok_counts.append(n_tok)
-            print(f"  [{idx + 1:>2}/{len(prompts)}] {n_tok:>3} tok  ratio={r:>7.1f}x  {tag}")
+            rs_txt = f"{r:>7.1f}x" if np.isfinite(r) else "    n/a"
+            print(f"  [{idx + 1:>2}/{len(prompts)}] {n_tok:>3} tok  ratio={rs_txt}  {tag}")
         except Exception as e:
             print(f"  [{idx + 1:>2}/{len(prompts)}] 失败 {type(e).__name__}: {str(e)[:44]}")
 
@@ -267,8 +274,10 @@ def main() -> int:
         return 1
 
     C = np.array(curves)
+    A = np.array(abs_curves)
     mean_curve = C.mean(axis=0)
     med_curve = np.median(C, axis=0)
+    mean_abs = A.mean(axis=0)
 
     print("\n" + "=" * 70)
     print("汇总")
@@ -281,32 +290,40 @@ def main() -> int:
     else:
         print("\n  [自检] per_layer[0] 不是 embedding，层号按原样理解")
 
-    rs = np.array(ratios)
-    print(f"\n  各 prompt 的后/前 1/4 比值：")
-    print(f"    中位数 {np.median(rs):.1f}x   最小 {rs.min():.1f}x   最大 {rs.max():.1f}x")
-    print(f"    均值 {rs.mean():.1f}x ± {rs.std():.1f}x")
+    rs = np.array([r for r in ratios if np.isfinite(r)])
+    print(f"\n  各 prompt 的后/前 1/4 比值（{len(rs)}/{len(ratios)} 条有效）：")
+    if len(rs):
+        print(f"    中位数 {np.median(rs):.1f}x   最小 {rs.min():.1f}x   最大 {rs.max():.1f}x")
+        print(f"    均值 {rs.mean():.1f}x ± {rs.std():.1f}x")
+        if len(rs) < len(ratios):
+            print(f"    注：{len(ratios) - len(rs)} 条因前 1/4 差异过小无法计算，已排除")
 
-    print(f"\n  平均相对差异曲线（{len(mean_curve)} 层）：")
-    print(f"  {'层':<5} {'均值':>12} {'中位数':>12}  趋势")
-    print("  " + "-" * 58)
-    peak = max(mean_curve.max(), 1e-12)
+    print(f"\n  逐层差异（{len(mean_curve)} 层）：")
+    print(f"  {'层':<5} {'相对(均值)':>12} {'相对(中位)':>12} {'绝对(均值)':>12}  趋势")
+    print("  " + "-" * 62)
+    peak = max(float(mean_curve.max()), 1e-12)
     for i, v in enumerate(mean_curve):
         bar = "█" * min(30, int(v / peak * 30))
         label = f"L{i}" if not is_emb else f"L{i - 1}*"
-        print(f"  {label:<5} {v:>12.3e} {med_curve[i]:>12.3e}  {bar}")
+        print(f"  {label:<5} {v:>12.3e} {med_curve[i]:>12.3e} {mean_abs[i]:>12.3e}  {bar}")
 
-    n = len(mean_curve)
+    # L0 的相对差异受分母影响（hidden 量级只有 L1 的 1/25 左右），
+    # 跨层比较时把 L0 排除，否则会低估放大倍数。
+    start = 1 if len(mean_curve) > 4 else 0
+    core = mean_curve[start:]
+    n = len(core)
     q = max(1, n // 4)
-    first = float(np.mean(mean_curve[:q]))
-    last = float(np.mean(mean_curve[-q:]))
+    first = float(np.mean(core[:q]))
+    last = float(np.mean(core[-q:]))
     overall = last / max(first, 1e-12)
 
     print("\n" + "=" * 70)
     print("结论")
     print("=" * 70)
+    print(f"  统计区间       L{start} – L{len(mean_curve) - 1}（排除 L0，其分母量级异常）")
     print(f"  前 1/4 层平均  {first:.3e}")
     print(f"  后 1/4 层平均  {last:.3e}")
-    print(f"  整体比值       {overall:.1f}x（单条中位数 {np.median(rs):.1f}x）")
+    print(f"  整体比值       {overall:.1f}x（单条中位数 {np.median(rs) if len(rs) else float('nan'):.1f}x）")
 
     if overall > 2.0:
         print("\n  → 单调上升，符合「误差累积」假设 A")
@@ -317,13 +334,26 @@ def main() -> int:
     else:
         print("\n  → 介于两者之间，两个因素都有贡献。")
 
-    # 稳健性：多少条 prompt 单独看也是「累积」
-    n_up = int((rs > 2.0).sum())
+    n_up = int((rs > 2.0).sum()) if len(rs) else 0
     print(f"\n  稳健性：{n_up}/{len(rs)} 条 prompt 单独看也 >2x")
-    if n_up >= len(rs) * 0.7:
-        print("  → 趋势在所有样本上一致，可信")
-    else:
+    if len(rs) and n_up >= len(rs) * 0.7:
+        print("  → 趋势在绝大多数样本上一致，可信")
+    elif len(rs):
         print("  → 样本间差异较大，结论需更多数据")
+
+    # 找放大最剧烈的几层（相对上一层的跳变）
+    jumps = []
+    for i in range(start + 1, len(mean_curve)):
+        prev = mean_curve[i - 1]
+        if prev > 1e-12:
+            jumps.append((i, mean_curve[i] / prev))
+    if jumps:
+        jumps.sort(key=lambda x: -x[1])
+        top = [(i, r) for i, r in jumps[:3] if r > 1.5]
+        if top:
+            print(f"\n  放大最剧烈的层（相对上一层）：")
+            for i, r in top:
+                print(f"    L{i - 1} → L{i}   {r:.1f}x")
 
     print()
     return 0
