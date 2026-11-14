@@ -215,7 +215,19 @@ def main() -> int:
 
     print("\n跑两次前向（原始 / 注入 vLLM 路由）")
     logits_o, h_o = run_with_hidden(tm, ids, None)
-    logits_i, h_i = run_with_hidden(tm, ids, rv)
+    logits_i, h_i = run_with_hidden(tm, ids, routes=rv)
+
+    # 自检：per_layer[0] 到底是 layer0 的输出，还是 embedding？
+    # 实测发现 L0 差异恒为 0，两个不同引擎不可能 bit-identical，
+    # 所以更可能是 hook 抓到了 embedding。
+    with torch.no_grad():
+        emb = tm.model.embed_tokens(ids).float()
+    is_emb = h_o[0].shape == emb.shape and torch.equal(h_o[0], emb)
+    if is_emb:
+        print("\n  [注意] per_layer[0] 等于 embedding —— 层号需整体减 1")
+        print("         register_forward_hook 抓到的是该层的输入，不是输出")
+    else:
+        print("\n  [自检] per_layer[0] 不是 embedding，层号按原样理解")
 
     print("\n逐层 hidden 差异")
     print("─" * 70)
@@ -229,7 +241,8 @@ def main() -> int:
         rel = d / max(scale, 1e-9)
         rel_list.append(rel)
         bar = "█" * min(30, int(rel * 300))
-        print(f"  L{i:<4d} {d:>12.3e} {scale:>12.3e} {rel:>9.2e}  {bar}")
+        label = f"L{i}" if not is_emb else f"L{i - 1}*"
+        print(f"  {label:<5} {d:>12.3e} {scale:>12.3e} {rel:>9.2e}  {bar}")
 
     d_logits = (logits_o - logits_i).abs().max().item()
     print(f"\n  最终 logits 差异  {d_logits:.3e}")
@@ -258,6 +271,8 @@ def main() -> int:
         print("\n  → 介于两者之间，两个因素都有贡献。")
 
     print("\n  注意：这个实验只用了 1 条 prompt，趋势需多样本确认。")
+    if is_emb:
+        print("  另外：层号已按 embedding 自检结果标注，带 * 的行是调整后的。")
     print()
     return 0
 
