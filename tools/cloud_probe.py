@@ -228,45 +228,90 @@ def semantic_locality(per_prompt_routes, num_experts):
     }
 
 
-def capacity_stats(routes, num_experts, ks):
+def _sample_batch(per_prompt, m, mode, rng):
     """
-    模拟 batch 推理：取 M 个 token 一批，统计每个 expert 的负载。
+    取一个 batch 的路由切片 [m, L, k]。
 
-    倍数会随 M 变小而爆炸（分母太小），所以同时给出峰值绝对值和建议的 C。
+    continuous —— 连续 m 个 token（同一 prompt 内），对应 prefill
+    random     —— 每个 token 来自不同 prompt，对应 decode
     """
-    N, L, k = routes.shape
+    L = per_prompt[0].shape[1]
+    k = per_prompt[0].shape[2]
+    dtype = per_prompt[0].dtype
+
+    if mode == "continuous":
+        for r in per_prompt:
+            if r.shape[0] >= m:
+                s = int(rng.integers(0, r.shape[0] - m + 1))
+                return r[s : s + m]
+        allr = np.concatenate(per_prompt, axis=0)
+        s = int(rng.integers(0, max(1, allr.shape[0] - m + 1)))
+        return allr[s : s + m]
+
+    out = np.zeros((m, L, k), dtype=dtype)
+    for i in range(m):
+        p = int(rng.integers(0, len(per_prompt)))
+        t = int(rng.integers(0, per_prompt[p].shape[0]))
+        out[i] = per_prompt[p][t]
+    return out
+
+
+def _peak_counts(batch, num_experts):
+    """一个 batch 内，逐层统计最忙 expert 的负载，返回最大值"""
+    L = batch.shape[1]
+    peak = 0
+    peak_ratio = 0.0
+    for layer in range(L):
+        seg = batch[:, layer, :].reshape(-1)
+        counts = np.bincount(seg, minlength=num_experts).astype(float)
+        mean = counts.mean()
+        if mean <= 0:
+            continue
+        if counts.max() > peak:
+            peak = float(counts.max())
+            peak_ratio = float(counts.max() / mean)
+    return peak, peak_ratio
+
+
+def capacity_stats(per_prompt, num_experts, ks, n_trials=20):
+    """
+    模拟 batch 推理时每个 expert 的负载。
+
+    两种采样模式对两个真实阶段：
+      continuous —— prefill（同一 prompt 的连续 token，语义相关）
+      random     —— decode（不同请求各 1 个 token，语义互不相关）
+
+    倍数会随 M 变小而爆炸（分母太小），所以同时给出峰值绝对值和建议 C。
+    peak 取多次采样的最大值（真实 batch 组成是随机的，要看最坏情况）。
+    """
+    rng = np.random.default_rng(0)
+    k = per_prompt[0].shape[2]
     out = []
 
     for m in ks:
-        if m > N:
-            continue
-        worst_ratio = 0.0
-        worst_peak = 0.0
-        ratios = []
-        for layer in range(L):
-            seg = routes[:m, layer, :].reshape(-1)
-            counts = np.bincount(seg, minlength=num_experts).astype(float)
-            mean = counts.mean()
-            if mean <= 0:
+        row = {"M": int(m), "expected_per_expert": round(m * k / num_experts, 2)}
+
+        for mode in ("continuous", "random"):
+            peaks, ratios = [], []
+            ok = True
+            for _ in range(n_trials):
+                try:
+                    batch = _sample_batch(per_prompt, m, mode, rng)
+                except Exception:
+                    ok = False
+                    break
+                p, r = _peak_counts(batch, num_experts)
+                peaks.append(p)
+                ratios.append(r)
+            if not ok or not peaks:
                 continue
-            ratios.append(counts.max() / mean)
-            if counts.max() > worst_peak:
-                worst_peak = float(counts.max())
-                worst_ratio = float(counts.max() / mean)
+            row[f"{mode}_peak_max"] = int(max(peaks))
+            row[f"{mode}_peak_avg"] = round(float(np.mean(peaks)), 1)
+            row[f"{mode}_ratio"] = round(float(np.mean(ratios)), 2)
+            row[f"{mode}_C"] = int(np.ceil(max(peaks) * 1.15))
 
-        if not ratios:
-            continue
-
-        out.append(
-            {
-                "M": int(m),
-                "expected_per_expert": round(m * k / num_experts, 2),
-                "max_over_mean_layer_avg": round(float(np.mean(ratios)), 2),
-                "max_over_mean_worst": round(worst_ratio, 2),
-                "peak_count": int(worst_peak),
-                "suggested_C": int(np.ceil(worst_peak * 1.15)),
-            }
-        )
+        if "continuous_peak_max" in row or "random_peak_max" in row:
+            out.append(row)
     return out
 
 
@@ -316,21 +361,15 @@ def interpret(cov, dist, temp, sem, cap):
             lines.append(f"同 prompt vs 跨 prompt 比值 {r}x → 语义局部性不强")
 
     if cap:
-        small = [c for c in cap if c["M"] <= 32]
-        large = [c for c in cap if c["M"] >= 256]
-        if small:
-            w = max(small, key=lambda c: c["max_over_mean_worst"])
-            lines.append(
-                f"小 batch M={w['M']}：峰值 {w['peak_count']} 个 vs 期望 {w['expected_per_expert']:.2f} "
-                f"→ 建议 C={w['suggested_C']}（{w['max_over_mean_worst']}x 是分母小造成的，不能当 factor 用）"
-            )
-        if large:
-            w = max(large, key=lambda c: c["max_over_mean_worst"])
-            lines.append(
-                f"大 batch M={w['M']}：峰值 {w['peak_count']} 个 vs 期望 {w['expected_per_expert']:.2f} "
-                f"→ 建议 C={w['suggested_C']}"
-            )
-        lines.append("capacity_factor 必须随 M 变：小 batch 需要更大的绝对冗余")
+        lines.append("capacity 要分两个阶段看：")
+        for c in cap:
+            if c["M"] in (8, 32, 128, 512):
+                lines.append(
+                    f"  M={c['M']:<4} prefill C={c.get('continuous_C', '-')!s:<5} "
+                    f"decode C={c.get('random_C', '-')}"
+                )
+        lines.append("prefill 的 token 同源、语义相关 → 路由集中，C 要大")
+        lines.append("decode 的 token 跨请求 → 路由分散，C 可小；统一按 prefill 取更安全")
 
     return lines
 
@@ -383,7 +422,7 @@ def main() -> int:
     dist = distribution_shape(all_routes, E)
     temp = temporal_locality(all_routes, E)
     sem = semantic_locality(per_prompt, E)
-    cap = capacity_stats(all_routes, E, [8, 16, 32, 64, 128, 256, 512])
+    cap = capacity_stats(per_prompt, E, [8, 16, 32, 64, 128, 256, 512])
 
     print("\n① 覆盖曲线（vs 纯均匀随机）")
     print("─" * 68)
@@ -415,12 +454,15 @@ def main() -> int:
 
     print("\n⑤ capacity 分布")
     print("─" * 68)
-    print(f"  {'M':>5} {'期望/专家':>10} {'峰值/均值':>10} {'峰值个数':>9} {'建议 C':>8}")
+    print("  prefill = 连续 token（同一 prompt）   decode = 跨请求各取 1 个")
+    print()
+    print(f"  {'M':>5} {'期望':>7} | {'prefill峰值':>11} {'建议C':>6} | {'decode峰值':>10} {'建议C':>6}")
     for c in cap:
-        print(
-            f"  {c['M']:>5} {c['expected_per_expert']:>10} "
-            f"{c['max_over_mean_worst']:>10} {c['peak_count']:>9} {c['suggested_C']:>8}"
-        )
+        pc = c.get("continuous_peak_max", "-")
+        pcc = c.get("continuous_C", "-")
+        rc = c.get("random_peak_max", "-")
+        rcc = c.get("random_C", "-")
+        print(f"  {c['M']:>5} {c['expected_per_expert']:>7} | {pc:>11} {pcc:>6} | {rc:>10} {rcc:>6}")
 
     lines = interpret(cov, dist, temp, sem, cap)
     print("\n" + "=" * 68)
