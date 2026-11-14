@@ -343,21 +343,36 @@ Windows 占用:    1.11 GiB
 
 ### 第 4 类的实测结论
 
-三层门禁在 RTX 5060 Laptop 8GB / bf16 下的结果：
+同一份门禁脚本在两张卡上的结果：
 
 | 层 | 裂缝 | 影响面 | 约束 |
 |---|---|---|---|
-| GEMM | `M=1` vs `M≥2`（gemv / gemm） | 0.1% | decode `M ≥ 2` |
+| GEMM | 路径分界点**依架构而变** | 0.1% ~ 36% | 每台机器实测 |
 | Attention | 四个 SDPA 后端互不一致 | 23% | 启动时锁定一个 |
 | Attention | `is_causal` vs 显式 mask | 6.6% | 统一写法 |
 | Attention | KV 总长度 `S` 变化 | 23% | 全局固定 `S` |
 | MoE | combine 顺序（slot vs expert） | 17% | 按 slot 累加 |
-| MoE | capacity 溢出 | 静默丢 token | `C` ≥ 2.5× 期望 |
+| MoE | capacity 溢出 | 静默丢 token | `C` 按 M 定 |
 
-**根因只有一个：同一段数学存在多套代码路径，路径之间的浮点归约顺序不同。**
+#### GEMM 的分界点不能跨卡搬
+
+| 检查 | RTX 5060（Blackwell） | A10（Ampere） |
+|---|---|---|
+| `M=1 vs M=2` | **FAIL**（6/5632） | **PASS** |
+| `M=128 vs M=256` | PASS | **FAIL**（35.9%，max=0.0312） |
+
+**分界点从 `M=2` 挪到 `M=128`。**
+
+在 A10 上，危险的是 **prefill 而不是 decode**：decode 的 M = batch size（≤64，安全），
+prefill 的 M = token 数（长 prompt 几百 token，正好跨分界）。
+
+这意味着用 `"Hi"` 这种极短 prompt 做的批不变性实验，在 A10 上会得出「一切正常」的假象。
+
+**根因只有一个：同一段数学存在多套代码路径，路径之间的浮点归约顺序不同。
+而「哪几条路径存在、分界在哪」由 GPU 架构决定。**
 
 所以不变量不是「固定 shape」，是**「固定代码路径」**——
-把运行时 dispatch 变成启动时配置。
+把运行时 dispatch 变成启动时配置。而路径清单必须每台机器实测。
 
 细节见 [`r3-adapter/determinism/README.md`](r3-adapter/determinism/README.md)。
 

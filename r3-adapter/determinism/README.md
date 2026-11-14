@@ -20,19 +20,52 @@
 | `moe_gate.py` | combine 顺序、capacity 溢出 | 否（纯 PyTorch 逻辑模拟） |
 | `skeleton_moe.py` | MoE 实现与 HF 逐层对齐 | 否（零下载，现场构造小模型） |
 
-## 实测结论（RTX 5060 Laptop 8GB / torch 2.14.0+cu130 / bf16）
+## 实测结论（bf16，两张卡对照）
 
 | 层 | 裂缝 | 影响面 | 约束 |
 |---|---|---|---|
-| GEMM | `M=1` vs `M≥2`（gemv / gemm） | 0.1%（6/5632） | decode `M ≥ 2` |
+| GEMM | 路径分界点**依架构而变** | 0.1% ~ 36% | 见下方对照表 |
 | Attention | 四个后端互不一致 | 23%（475/2048） | 启动时锁定一个 |
 | Attention | `is_causal` vs 显式 mask | 6.6% | 统一写法 |
 | Attention | KV 总长度 `S` 变化 | 23% | 全局固定 `S` |
 | MoE | combine 顺序（slot vs expert） | 17%（174/1024） | 按 slot 累加 |
 | MoE | capacity 溢出 | 静默丢 token | `C` 按 M 定，见下 |
 
-**反直觉的一点**：GEMM 最轻，attention 和 MoE 才是主战场。
-分叉越多，裂缝越多。
+### GEMM 的分界点不可跨卡迁移
+
+同一份 `gemm_gate.py`，两张卡的结果：
+
+| 检查 | RTX 5060 Laptop（Blackwell sm_120） | A10（Ampere sm_86） |
+|---|---|---|
+| `M=1 vs M=2` | **FAIL**（6/5632） | **PASS** |
+| `M=1 vs M=64` | FAIL | **PASS** |
+| `M=128 vs M=256` | PASS | **FAIL**（35.9%，max=0.0312） |
+| `M=128 vs M=130` | PASS | PASS |
+
+**分界点从 `M=2` 挪到 `M=128`。**
+
+A10 上 `M≥128` 的表现：
+
+| 对照 | 元素差异 | max | 判断 |
+|---|---|---|---|
+| `M=128 vs M=256` | 35.9% | 0.0312（4 ulp） | 不同 kernel |
+| `M=128 vs M=200` | 26.8% | 0.0312 | 不同 kernel |
+| `M=128 vs M=512` | 35.9% | 0.0312 | 不同 kernel |
+| `M=128 vs M=300` | 0.1% | 0.0156（2 ulp） | 同 kernel 边界效应 |
+
+至少 4 条路径：`M≤64` / `M=128` / `M=200` / `M≥256`。
+
+**推论**：
+
+1. **不能跨卡搬结论。** 5060 上“decode 需要 `M≥2`”，A10 上 M≤64 全部一致，这条约束不存在。
+2. **A10 上危险的是 prefill 而非 decode。** decode 的 M = batch size（通常 ≤64，安全）；
+   prefill 的 M = token 数（长 prompt 动辄几百，跨分界）。
+3. **短 prompt 的实验会漏掉真正的问题。** `"Hi"` + `"Hello there"` 的 M 在 1~4，
+   恰好落在 A10 的安全区——这时候测出的“批不变性成立”是假象。
+
+每台新机器都必须跑一次 `gemm_gate.py`，不能假设分界点。
+
+**反直觉的一点**：GEMM 不一定最轻。在 A10 上它的影响面（36%）超过了 attention（23%）。
 
 ### capacity 的实测值（Qwen1.5-MoE-A2.7B / 60 专家 top-4 / 818 token）
 
@@ -86,6 +119,9 @@ M=512 时需要 85，实测 118。两头都不对。
 - Attention：flash / efficient / math / cudnn
 - Mask：`is_causal` / 显式矩阵
 - MoE：slot 顺序 / expert 顺序
+
+而**「哪几条路径存在、分界在哪」由 GPU 架构决定**（cuBLAS 按 SM 数、tile 尺寸、
+寄存器压力挑 kernel）。所以约束必须实测，不能从别的机器抄。
 
 处置手段只有一个：**把运行时 dispatch 变成启动时配置。**
 
