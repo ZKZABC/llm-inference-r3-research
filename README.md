@@ -18,6 +18,7 @@
 │   ├── contract_check.py           # 纯逻辑契约测试（无需 GPU）
 │   ├── mini_moe_r3.py              # 微型 MoE 在 CPU 上验证 R3 数学命题
 │   ├── r3_verify.py                # 真实 vLLM 环境验证脚本（需 GPU）
+│   ├── FIRST_REAL_DATA.md          # ★ 第一条真实 routed_experts 实测记录
 │   └── SETUP_WSL2.md               # WSL2 环境搭建 + 真实踩坑记录
 ├── output/                         # 调研报告（Word / HTML / Markdown）
 │   └── rpt_20261113_172650/
@@ -42,6 +43,23 @@
 | 路由偏差 | 推理与训练的专家选择不同 | R3 记录 + Router Replay |
 | 动作空间偏差 | 采样 mask 不一致 | sampling mask 对齐 |
 | 打分偏差 | score centering 不同 | 归一化对齐 |
+
+## 第一条真实数据（2026-11-14 实测）
+
+在 ModelScope 的 AMD GPU 实例（**192 GB 显存 / ROCm 7.2.3**）上跑通：
+
+```python
+shape  = (8, 24, 4)     # 8 行 = 1 prompt + 8 gen − 1（末 token 无路由）
+dtype  = uint8
+range  = 0 ~ 59         # 60 个专家，无越界、无 -1
+unique = 60             # 全部 60 个专家都被激活
+token0-layer0 = [33, 52, 7, 54]
+```
+
+**契约四条全部成立。** 详细记录见 [`r3-adapter/FIRST_REAL_DATA.md`](r3-adapter/FIRST_REAL_DATA.md)。
+
+其中最有价值的一个发现：`unique = 60` 说明 **768 个专家实例均匀覆盖全部 60 个专家**——
+路由没有局部性，所以「靠热门/冷门专家做缓存分层」的思路行不通，也解释了为什么 MoE 的 CPU offload 收益有限。
 
 ## 快速开始
 
