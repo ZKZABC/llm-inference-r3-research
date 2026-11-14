@@ -61,6 +61,41 @@ token0-layer0 = [33, 52, 7, 54]
 其中最有价值的一个发现：`unique = 60` 说明 **768 个专家实例均匀覆盖全部 60 个专家**——
 路由没有局部性，所以「靠热门/冷门专家做缓存分层」的思路行不通，也解释了为什么 MoE 的 CPU offload 收益有限。
 
+### 但 R3 有一个隐藏前提：批不变性
+
+同一条 prompt 在 `batch=1` 和 `batch=2` 下的路由对比：
+
+| 配置 | 结果 |
+|---|---|
+| 默认 | `diff: 3 / 768` ❌ 路由翻转 |
+| `VLLM_BATCH_INVARIANT=1` | `diff: 0 / 768` ✅ 完全一致 |
+
+**结论：R3 可行，但必须显式开启 `VLLM_BATCH_INVARIANT=1`。**
+
+这条不在官方 `routed_experts.md` 的 Requirements 里——少了它，
+shape/dtype/合法性全部通过，但数据在真实 RL 场景下不可复现。
+
+代价：`torch.compile` 让引擎初始化从 10 秒变成 **130 秒**（一次性，有缓存）。
+
+### 跑通 R3 的三个必备条件
+
+```bash
+VLLM_BATCH_INVARIANT=1 vllm serve <model> \
+  --enable-return-routed-experts \
+  --max-model-len 512 \
+  --gpu-memory-utilization 0.9
+```
+
+```json
+{"temperature": 0, "repetition_penalty": 1.0}
+```
+
+| # | 条件 | 不满足会怎样 |
+|---|---|---|
+| ① | `--enable-return-routed-experts` | `routed_experts` 为 `None` |
+| ② | `VLLM_BATCH_INVARIANT=1` | batch 组成一变，路由就翻转 |
+| ③ | `repetition_penalty=1.0` | 模型自带的 1.05 改变 logits，间接影响专家选择 |
+
 ## 快速开始
 
 ### 0. 先自检（强烈建议，30 秒）
