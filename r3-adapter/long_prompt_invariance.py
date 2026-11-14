@@ -76,30 +76,44 @@ _SENTENCE = (
 )
 
 
-def build_prompt(host, model, target_tokens, tag="A", tries=12):
+def build_prompt(host, model, target_tokens, tag="A"):
     """
-    构造接近 target_tokens 的 prompt。
+    按字符级二分校准，精确到 ±1 token。
 
-    优先用 /tokenize 做精确校准；不可用时按 15 token/句 估算，
-    实际长度从返回的 routed_experts 形状反推。
+    早期版本按「句子数」二分，粒度 15 token，导致
+    120/126/127/128/129/130 全部收敛到 116，关键梯度失效。
     """
-    lo, hi = 1, max(2, target_tokens // 8 + 40)
-    best = _SENTENCE * lo
+    base = _SENTENCE * 60
+    suffix = f" [{tag}]"
+    full = base + suffix
 
-    for _ in range(tries):
+    n_full = token_count(host, model, full)
+    if n_full is None:
+        # 无法校准，按 15 token/句估算
+        approx = max(1, round(target_tokens / 15))
+        return (_SENTENCE * approx) + suffix, target_tokens
+
+    if n_full < target_tokens:
+        return full, n_full
+
+    lo, hi = 0, len(base)
+    best_text, best_n = full, n_full
+
+    while lo < hi:
         mid = (lo + hi) // 2
-        cand = (_SENTENCE * mid) + f"[{tag}]"
-        n = token_count(host, model, cand)
+        text = base[:mid] + suffix
+        n = token_count(host, model, text)
         if n is None:
-            return _SENTENCE * max(1, round(target_tokens / 15)) + f"[{tag}]", target_tokens
+            break
         if n < target_tokens:
             lo = mid + 1
-            best = cand
         else:
-            hi = mid - 1
-            if abs(n - target_tokens) <= 2:
-                return cand, n
-    return best, token_count(host, model, best) or target_tokens
+            hi = mid
+            best_text, best_n = text, n
+            if abs(n - target_tokens) <= 1:
+                return text, n
+
+    return best_text, best_n
 
 
 def run_batch(host, model, prompts, max_tokens=1):
@@ -193,6 +207,7 @@ def main() -> int:
                 "actual_A": int(actual_a),
                 "batch_M": int(m_batch),
                 "n_diff": nd,
+                "n_total": tot,
                 "rows_with_diff": [int(r) for r in rows[:20]],
                 "ok": bool(ok),
             }
@@ -206,22 +221,35 @@ def main() -> int:
         print("  所有长度上，加一条无关 prompt 都没有改变 A 的路由。")
         print("  → 当前配置下批不变性成立。")
     else:
-        ok_rows = [r for r in results if r["ok"]]
-        bad_rows = [r for r in results if not r["ok"]]
-        print(f"  {n_fail}/{len(results)} 个长度出现分歧。")
-        if ok_rows and bad_rows:
-            max_ok = max(r["batch_M"] for r in ok_rows)
-            min_bad = min(r["batch_M"] for r in bad_rows)
-            print(f"  最后一次一致时的同批 M = {max_ok}")
-            print(f"  最早出现分歧时的同批 M = {min_bad}")
-            if min_bad > max_ok:
-                print(f"  → 分界落在 M ∈ ({max_ok}, {min_bad}] 之间")
-        print("\n  这意味着：加一条无关的短 prompt，会改变另一条 prompt 的路由。")
-        print("  在 RL rollout 里，batch 组成是动态的——记录的路由无法稳定复现。")
-        print("\n  处置：")
+        print(f"  {n_fail}/{len(results)} 个长度出现分歧：")
+        print()
+        print(f"  {'A长度':>6} {'同批M':>7} {'差异元素':>16} {'比例':>9}")
+        print("  " + "-" * 44)
+        for r in results:
+            if r["ok"]:
+                continue
+            ratio = r["n_diff"] / max(r["n_total"], 1)
+            print(
+                f"  {r['actual_A']:>6} {r['batch_M']:>7} "
+                f"{r['n_diff']:>7}/{r['n_total']:<8} {ratio:>8.3%}"
+            )
+
+        worst = max(r["n_diff"] / max(r["n_total"], 1) for r in results if not r["ok"])
+        print()
+        if worst < 0.01:
+            print(f"  最大分歧比例 {worst:.3%} —— 偶发边界翻转，不是系统性 kernel 分叉")
+            print("  对照：裸 PyTorch 的 GEMM 分叉是 35.9%（差 4 个 ulp），量级差两个数量级")
+            print()
+            print("  但 R3 要求精确回放，任何翻转都会让训练侧走错专家：")
+            print("  200 token × 24 层 × 4 专家 = 19200 个槽位，0.017% 就是约 3 个槽位翻转。")
+        else:
+            print(f"  最大分歧比例 {worst:.3%} —— 系统性分叉，是 kernel 路径不同的证据")
+
+        print()
+        print("  处置：")
         print("    1. 确认 VLLM_BATCH_INVARIANT=1 已开启（本脚本不负责开）")
-        print("    2. 若已开启仍分歧，说明该开关没覆盖到 M≥128 的路径")
-        print("    3. 只能把 prefill 的 M 固定到单一 bucket（padding 到固定长度）")
+        print("    2. 若已开启仍分歧，残余来自逐层浮点累积，开关消不掉")
+        print("    3. 只能固定 prefill 的 M 到单一 bucket，并接受低概率残余")
 
     print()
     return 0 if n_fail == 0 else 1
