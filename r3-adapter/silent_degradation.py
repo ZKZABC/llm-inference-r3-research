@@ -98,7 +98,9 @@ def parse_facts(text: str) -> dict:
         re.search(r"matmul_persistent|batch_invariant\.py", text)
     )
 
-    for m in re.finditer(r"([A-Za-z ]+) kernel not used because", text):
+    for m in re.finditer(
+        r"(?:(?:WARNING|INFO|ERROR)\s+)?([A-Za-z ]+?)\s+kernel not used because", text
+    ):
         facts["sdpa_fallbacks"].append(m.group(1).strip())
 
     if re.search(r"overridden by the model's\s+`?generation_config", text, re.I):
