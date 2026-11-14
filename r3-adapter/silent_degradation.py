@@ -330,6 +330,51 @@ def run_rules(facts: dict, text: str, model_gib: float = None) -> list:
 
 SEV_ORDER = {"CRITICAL": 0, "WARN": 1, "INFO": 2, "OK": 3}
 
+# 装包会碰到的「承重墙」——动了它们，vLLM 大概率起不来
+CRITICAL_PKGS = {"torch", "transformers", "vllm", "numpy", "accelerate", "tokenizers"}
+
+
+def parse_pip_plan(text: str) -> list:
+    """
+    解析 `pip install --dry-run` 或普通 install 的依赖冲突输出。
+
+    真实事故（2026-11-14）：pip install gptqmodel 把 torch 2.14→2.15、
+    transformers 5.16→5.23，vLLM 直接不可用。pip 只给了 warning：
+
+        vllm 0.33.0 requires torch==2.14.0, but you have torch 2.15.0
+        which is incompatible
+
+    混在几十行输出里，很容易滑过去。这里把它提升为 CRITICAL。
+    """
+    out = []
+    # 两个坑：
+    #   1. "you have torch 2.15.0 which" 中间有版本号，不能写 (\S+)\s+which
+    #   2. 版本约束可能带逗号（transformers<5.21.0,>=5.16.1），不能写 [^,;]
+    pat = re.compile(
+        r"(\S+)\s+([\d.]+)\s+requires\s+([^;\n]+?),\s+but you have\s+(\S+)\s+([\d.]+)\s+which is incompatible"
+    )
+    seen = set()
+    for m in pat.finditer(text):
+        owner, owner_ver, req, have_pkg, have_ver = m.groups()
+        pkg = re.split(r"[=<>!~\[\s]", req.strip())[0].strip()
+        if pkg not in CRITICAL_PKGS or pkg in seen:
+            continue
+        seen.add(pkg)
+        out.append(
+            Finding(
+                code="PIP_BREAKS_CRITICAL",
+                severity="CRITICAL",
+                title=f"这次安装会破坏 {pkg}",
+                evidence=[m.group(0).strip()[:170]],
+                impact=f"{owner} {owner_ver} 要求 {req}，实际会变成 {have_pkg} {have_ver}",
+                fix=(
+                    "在隔离 venv 里装（python -m venv ~/xxx && source ~/xxx/bin/activate），"
+                    "或 pip install --no-deps 后手工补依赖"
+                ),
+            )
+        )
+    return out
+
 
 def print_report(findings: list, facts: dict):
     print("\n关键事实")
@@ -362,8 +407,50 @@ def main() -> int:
     ap.add_argument("--log", default=None, help="vLLM 启动日志文件")
     ap.add_argument("--stdin", action="store_true", help="从标准输入读日志")
     ap.add_argument("--model-gib", type=float, default=None, help="模型原始大小，用于核对 offload 是否生效")
+    ap.add_argument("--pip-plan", default=None, help="pip install 的输出文件（用 - 从 stdin 读）")
     ap.add_argument("--json", action="store_true", help="输出 JSON")
     args = ap.parse_args()
+
+    # 模式二：检查装包计划会不会破坏关键依赖
+    if args.pip_plan:
+        if args.pip_plan == "-":
+            text_in = sys.stdin.read()
+        else:
+            if not os.path.exists(args.pip_plan):
+                print(f"找不到文件：{args.pip_plan}")
+                print("用法：pip install xxx --dry-run 2>&1 | python silent_degradation.py --pip-plan -")
+                return 1
+            with open(args.pip_plan, "r", encoding="utf-8", errors="replace") as fh:
+                text_in = fh.read()
+
+        plans = parse_pip_plan(text_in)
+        print("=" * 68)
+        print("装包计划检查")
+        print("=" * 68)
+        print(f"\n  输入   {len(text_in.splitlines())} 行")
+
+        if not plans:
+            print("\n  没有发现会破坏关键依赖的变更。可以装。")
+            if args.json:
+                print(json.dumps({"findings": []}, ensure_ascii=False, indent=2))
+            print()
+            return 0
+
+        for p in plans:
+            print(f"\n  [{p.severity}] {p.code}")
+            print(f"      {p.title}")
+            for e in p.evidence:
+                print(f"      > {e}")
+            print(f"      影响：{p.impact}")
+            print(f"      处置：{p.fix}")
+
+        print("\n" + "=" * 68)
+        print("结论")
+        print("=" * 68)
+        print(f"  {len(plans)} 项会破坏关键依赖。")
+        print("  直接装的话，vLLM 可能起不来，而且 pip 只给 warning 不拦。")
+        print()
+        return 1
 
     if args.stdin or not args.log:
         text = sys.stdin.read()

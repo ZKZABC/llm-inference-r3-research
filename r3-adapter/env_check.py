@@ -326,6 +326,95 @@ def check_model(path: str, gpu: dict | None, mem: dict, util: float, max_len: in
         add("offload 可行性", WARN, "无法判断（缺 torch），建议先装依赖再复检")
 
 
+def check_quant_stack(model_path: str | None) -> None:
+    """GPTQ 加载路径的依赖兼容性
+
+    真实事故（2026-11-14）：
+      transformers 5.16 调用 optimum.gptq.GPTQQuantizer.from_dict()，
+      但 optimum 2.3 已移除 QuantizeConfig，加载时抛
+      NameError: name 'QuantizeConfig' is not defined
+
+    这个检查能在加载模型之前拦住，不用等到跑起来才炸。
+    """
+    section("量化栈兼容性")
+
+    if not model_path or not os.path.isdir(model_path):
+        add("GPTQ 加载路径", SKIP, "未指定 --model，跳过")
+        return
+
+    cfg_path = os.path.join(model_path, "config.json")
+    if not os.path.exists(cfg_path):
+        add("量化格式", SKIP, "无 config.json")
+        return
+
+    with open(cfg_path, encoding="utf-8") as f:
+        cfg = json.load(f)
+    qc = cfg.get("quantization_config") or {}
+    method = str(qc.get("quant_method", "")).lower()
+
+    if method != "gptq":
+        add("量化格式", OK, f"{method or 'dense'}，不走 GPTQ 加载")
+        return
+    add("量化格式", OK, "GPTQ")
+
+    tf_ver, opt_ver = None, None
+    try:
+        import transformers
+
+        tf_ver = transformers.__version__
+    except Exception:
+        pass
+    try:
+        import optimum
+
+        opt_ver = getattr(optimum, "__version__", "?")
+    except Exception:
+        pass
+
+    has_qc = False
+    try:
+        from optimum.gptq.quantization import QuantizeConfig  # noqa: F401
+
+        has_qc = True
+    except Exception:
+        has_qc = False
+
+    has_gptqmodel = False
+    try:
+        import gptqmodel  # noqa: F401
+
+        has_gptqmodel = True
+    except Exception:
+        pass
+
+    try:
+        tf_major = int(str(tf_ver).split(".")[0])
+    except Exception:
+        tf_major = 0
+
+    if tf_major >= 5 and not has_qc:
+        if has_gptqmodel:
+            add(
+                "GPTQ 加载路径",
+                WARN,
+                f"transformers {tf_ver} 会调 optimum.gptq，但 optimum {opt_ver} 已无 QuantizeConfig",
+                "用 gptqmodel.GPTQModel.load()（它不走 transformers.quantizers）",
+            )
+        else:
+            add(
+                "GPTQ 加载路径",
+                FAIL,
+                f"transformers {tf_ver} + optimum {opt_ver} 组合必然 NameError: QuantizeConfig",
+                "pip install gptqmodel；或降到 transformers 4.x + optimum 1.x",
+            )
+    else:
+        add(
+            "GPTQ 加载路径",
+            OK,
+            f"transformers {tf_ver} / optimum {opt_ver} / gptqmodel={has_gptqmodel}",
+        )
+
+
 def verdict() -> int:
     fails = [f for f in FINDINGS if f[0] == FAIL]
     warns = [f for f in FINDINGS if f[0] == WARN]
@@ -369,7 +458,7 @@ def main() -> int:
     args = ap.parse_args()
 
     print("=" * 66)
-    print("R3 环境自检 —— 6 项检查对应 6 个真实踩过的坑")
+    print("R3 环境自检 —— 7 项检查对应 7 个真实踩过的坑")
     print("=" * 66)
 
     check_platform()
@@ -382,6 +471,8 @@ def main() -> int:
         section("模型适配")
         add("显存预算", SKIP, "未指定 --model，跳过",
             "加 --model <目录> 可计算模型能否装下")
+
+    check_quant_stack(args.model)
 
     return verdict()
 
