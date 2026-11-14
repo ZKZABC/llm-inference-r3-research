@@ -36,6 +36,7 @@
 
 import argparse
 import json
+import os
 import re
 import sys
 from dataclasses import asdict, dataclass, field
@@ -367,6 +368,23 @@ def main() -> int:
     if args.stdin or not args.log:
         text = sys.stdin.read()
     else:
+        if not os.path.exists(args.log):
+            print(f"找不到日志文件：{args.log}")
+            print()
+            print("日志从哪来，三个办法：")
+            print()
+            print("  1) 启动时就保存（推荐）")
+            print("     VLLM_BATCH_INVARIANT=1 vllm serve <model> \\")
+            print("       --enable-return-routed-experts ... 2>&1 | tee vllm.log")
+            print()
+            print("  2) 已经有日志，只是名字不同")
+            print("     ls -lh *.log nohup.out 2>/dev/null")
+            print("     ps aux | grep -i vllm | head -3")
+            print()
+            print("  3) 直接把进程输出管道过来")
+            print("     <命令> 2>&1 | python silent_degradation.py --stdin")
+            print()
+            return 1
         with open(args.log, "r", encoding="utf-8", errors="replace") as f:
             text = f.read()
 
