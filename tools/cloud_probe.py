@@ -286,10 +286,16 @@ def capacity_stats(per_prompt, num_experts, ks, n_trials=20):
     """
     rng = np.random.default_rng(0)
     k = per_prompt[0].shape[2]
+    max_len = max(r.shape[0] for r in per_prompt)
     out = []
 
     for m in ks:
-        row = {"M": int(m), "expected_per_expert": round(m * k / num_experts, 2)}
+        row = {
+            "M": int(m),
+            "expected_per_expert": round(m * k / num_experts, 2),
+            # 超过最长 prompt 时，continuous 会退化成跨 prompt 拼接，与 random 同质
+            "degraded": m > max_len,
+        }
 
         for mode in ("continuous", "random"):
             peaks, ratios = [], []
@@ -454,7 +460,9 @@ def main() -> int:
 
     print("\n⑤ capacity 分布")
     print("─" * 68)
+    max_len = max(r.shape[0] for r in per_prompt)
     print("  prefill = 连续 token（同一 prompt）   decode = 跨请求各取 1 个")
+    print(f"  最长 prompt {max_len} token —— 超过这个值的 prefill 列不可信（采样退化）")
     print()
     print(f"  {'M':>5} {'期望':>7} | {'prefill峰值':>11} {'建议C':>6} | {'decode峰值':>10} {'建议C':>6}")
     for c in cap:
@@ -462,7 +470,8 @@ def main() -> int:
         pcc = c.get("continuous_C", "-")
         rc = c.get("random_peak_max", "-")
         rcc = c.get("random_C", "-")
-        print(f"  {c['M']:>5} {c['expected_per_expert']:>7} | {pc:>11} {pcc:>6} | {rc:>10} {rcc:>6}")
+        flag = " ⚠️" if c.get("degraded") else ""
+        print(f"  {c['M']:>5} {c['expected_per_expert']:>7} | {pc:>11} {pcc:>6} | {rc:>10} {rcc:>6}{flag}")
 
     lines = interpret(cov, dist, temp, sem, cap)
     print("\n" + "=" * 68)
