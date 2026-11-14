@@ -20,8 +20,13 @@ FULL=${FULL:-0}
 echo "== 预检 =="
 rocminfo | grep -m1 "gfx" || true
 python -c "import torch; assert torch.version.hip, '需要 ROCm torch'; print('hip', torch.version.hip)"
-nvidia-smi 2>/dev/null || rocm-smi --showmeminfo vram | head -5
-free -g | awk '/Mem/{print "RAM free:", $7, "GB"}'
+# 注意 pipefail：head 提前关管道会让 rocm-smi 收 SIGPIPE，必须 || true 兜底
+if command -v nvidia-smi >/dev/null 2>&1; then
+  nvidia-smi --query-gpu=memory.total --format=csv,noheader || true
+else
+  rocm-smi --showmeminfo vram 2>/dev/null | head -5 || true
+fi
+free -g | awk '/Mem/{print "RAM free:", $7, "GB"}' || true
 
 # 1) 下载 OLMoE bf16（仅当不存在）
 if [ ! -f "$MODEL_DIR/config.json" ]; then
