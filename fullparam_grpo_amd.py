@@ -96,10 +96,46 @@ def group_advantage(rewards):
     return (r - r.mean()) / (r.std() + 1e-8)
 
 
-def load_model(path):
+def tokenizer_diag(path):
+    """tokenizer 装载失败时的自诊断：目录里到底是什么、后端缺哪个。"""
+    import os
+
+    lines = []
+    try:
+        files = sorted(os.listdir(path))
+    except Exception as e:  # noqa: BLE001
+        return [f"  目录不可读：{path} -> {e}"]
+    keys = ("token", "vocab", "merge", "special_tokens", "added", "spiece", "json")
+    shown = [f for f in files if any(k in f.lower() for k in keys)][:14]
+    lines.append(f"  目录 {path}")
+    lines.append(f"  相关文件：{', '.join(shown) or '（一个分词相关文件都没有）'}")
+    has_fast = "tokenizer.json" in files
+    lines.append(f"  tokenizer.json：{'存在' if has_fast else '不存在 → 必须走慢速分词器/外部后端路线'}")
+    for mod in ("sentencepiece", "tiktoken"):
+        try:
+            __import__(mod)
+            lines.append(f"  {mod}：已安装")
+        except ImportError:
+            lines.append(f"  {mod}：未安装；若上面报的就是它 → pip install {mod}")
+    lines.append("  若目录缺分词文件：用 --tokenizer 指向完整分词器目录，或从 modelscope 重下分词器。")
+    return lines
+
+
+def load_model(path, tok_path=None):
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    tok = AutoTokenizer.from_pretrained(path)
+    tok_path = tok_path or path
+    try:
+        tok = AutoTokenizer.from_pretrained(tok_path)
+    except Exception as e:  # noqa: BLE001
+        print("=" * 68)
+        print("tokenizer 加载失败 —— 原因与下一步：")
+        print(f"  {type(e).__name__}: {e}")
+        for line in tokenizer_diag(tok_path):
+            print(line)
+        print("=" * 68)
+        raise SystemExit(1) from e
+
     kwargs = {"trust_remote_code": True}
     try:
         model = AutoModelForCausalLM.from_pretrained(path, dtype=torch.bfloat16, **kwargs)
@@ -207,7 +243,9 @@ def selftest():
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default=None, help="本地模型目录（含 tokenizer）")
+    ap.add_argument("--model", default=None, help="本地模型目录（含权重与分词器）")
+    ap.add_argument("--tokenizer", default=None,
+                    help="分词器目录，默认与 --model 一致；模型目录缺分词文件时指向别处")
     ap.add_argument("--selftest", action="store_true", help="CPU 机械自检")
     ap.add_argument("--steps", type=int, default=2)
     ap.add_argument("--group", type=int, default=4)
@@ -224,7 +262,7 @@ def main():
     if not args.model:
         ap.error("需要 --model，或使用 --selftest")
 
-    model, tok = load_model(args.model)
+    model, tok = load_model(args.model, args.tokenizer)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = model.to(device)
     pad_id = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id

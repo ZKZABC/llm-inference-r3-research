@@ -92,7 +92,9 @@ def direction(old, new):
 
 
 def diff(old, new):
-    result = {"upgrade": [], "downgrade": [], "added": [], "removed": []}
+    # "changed"：字符串不同但排序分不出方向（如重装换了构建号 0.28.0 → 0.28.0+rocm723）。
+    # 构建号不同意味着二进制可能不同，也算漂移。
+    result = {"upgrade": [], "downgrade": [], "changed": [], "added": [], "removed": []}
     for name in sorted(set(old) | set(new)):
         if name not in old:
             result["added"].append((name, None, new[name]))
@@ -108,9 +110,10 @@ def has_drift(d):
 
 
 def print_diff(d):
-    sym = {"upgrade": "↑", "downgrade": "↓", "added": "+", "removed": "-"}
-    label = {"upgrade": "升级", "downgrade": "降级", "added": "新增", "removed": "移除"}
-    for kind in ("downgrade", "upgrade", "removed", "added"):
+    sym = {"upgrade": "↑", "downgrade": "↓", "changed": "~", "added": "+", "removed": "-"}
+    label = {"upgrade": "升级", "downgrade": "降级", "changed": "变体变更(构建号/后缀)",
+             "added": "新增", "removed": "移除"}
+    for kind in ("downgrade", "upgrade", "changed", "removed", "added"):
         rows = d[kind]
         if not rows:
             continue
@@ -119,6 +122,15 @@ def print_diff(d):
             print(f"    {name:<32} {o or '-':<18} -> {n or '-'}")
     if not has_drift(d):
         print("\n  无漂移")
+
+
+def norm_pin(v):
+    """剥掉 PEP 440 本地版本号再比较：0.28.0+rocm723 与 0.28.0 视为同一版本。
+
+    本地构建号（+rocm723 / +git6bbd260）只是发行变体，不影响兼容性判定；
+    但发行号本身（0.28 → 0.29）仍是漂移。
+    """
+    return str(v or "").split("+")[0].strip().lower()
 
 
 def check_pins(pins):
@@ -132,7 +144,7 @@ def check_pins(pins):
         name, want = pin.split("==", 1)
         name = name.strip().lower().replace("_", "-")
         got = cur.get(name)
-        out.append((pin, got == want.strip(), got))
+        out.append((pin, norm_pin(got) == norm_pin(want), got))
     return out
 
 
@@ -169,29 +181,34 @@ def report(before_pkgs, before_meta, pins, title):
               "降级会造成静默失效。")
 
     if pins:
-        print("\n  pin 校验")
+        print("\n  pin 校验（本地构建号如 +rocm723 / +git…… 不参与比较）")
         for pin, ok, got in check_pins(pins):
             print(f"    {'OK ' if ok else 'FAIL'} {pin:<34} 实际 {got}")
-            bad = bad or not ok
 
     print()
     if bad:
         print("结论：BLOCK —— 环境已偏离基线，先修复再继续。")
-        print("回滚思路：pip install <name>==<基线版本>，并卸载新装的不匹配包。")
+        if d["added"] and not any(d[k] for k in d if k != "added"):
+            print("  本次漂移全部是【纯新增】。若新增是有意的（如补装分词后端），"
+                  "修复执行后重跑 --save 刷新基线即可。")
+        else:
+            print("  回滚思路：pip install <name>==<基线版本>，并卸载新装的不匹配包。")
         return 1
     print("结论：PASS —— 与基线一致。")
     return 0
 
 
 def main():
-    ap = argparse.ArgumentParser(description="依赖漂移门禁：抓升级/降级/新增/移除")
+    ap = argparse.ArgumentParser(
+        description="依赖漂移门禁：抓升级/降级/变体变更/新增/移除",
+        epilog="pin 比较只看发行号（0.28.0+rocm723 与 0.28.0 视为同一版本）；"
+               "但构建号本身变化会记为“变体变更”，算漂移。")
     ap.add_argument("--save", metavar="PATH", help="保存当前环境为基线")
     ap.add_argument("--check", metavar="PATH", nargs="?", const=".depbaseline.json",
                     help="对比基线（默认 .depbaseline.json）")
     ap.add_argument("--run", metavar="CMD", help="执行命令，然后对比前后环境")
     ap.add_argument("--pin", action="append", default=[], metavar="NAME==VER",
-                    help="钉住关键版本，可重复")
-    ap.add_argument("--json", action="store_true", help="以 JSON 输出差异")
+                    help="钉住关键版本，可重复；本地构建号(+rocm723/+gitxxx)不参与比较")
     args = ap.parse_args()
 
     if args.save:
