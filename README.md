@@ -12,14 +12,22 @@
 ```
 .
 ├── r3-adapter/                     # R3 路由契约适配层（核心）
-│   ├── env_check.py                # ★ 环境自检（跑之前先查这台机器行不行）
-│   ├── r3_contract.py              # 可复用校验库（5 个校验原语）
+│   ├── env_check.py                # ★ 第 1 类：环境自检（跑之前先查这台机器行不行）
+│   ├── r3_contract.py              # ★ 第 2 类：可复用校验库（5 个校验原语）
+│   ├── silent_degradation.py       # ★ 第 3 类：静默降级检测（日志说做了但没生效）
+│   ├── determinism/                # ★ 第 4 类：可复现性门禁（跨 batch / 跨路径）
+│   │   ├── gemm_gate.py            #   gemv/gemm 路径分叉
+│   │   ├── attention_gate.py       #   后端 / mask / KV 长度
+│   │   ├── moe_gate.py             #   combine 顺序 / capacity 溢出
+│   │   └── skeleton_moe.py         #   MoE 实现与 HF 对齐的参考实现
 │   ├── test_r3_contract.py         # unittest 测试套件（11 项）
 │   ├── contract_check.py           # 纯逻辑契约测试（无需 GPU）
 │   ├── mini_moe_r3.py              # 微型 MoE 在 CPU 上验证 R3 数学命题
 │   ├── r3_verify.py                # 真实 vLLM 环境验证脚本（需 GPU）
 │   ├── FIRST_REAL_DATA.md          # ★ 第一条真实 routed_experts 实测记录
 │   └── SETUP_WSL2.md               # WSL2 环境搭建 + 真实踩坑记录
+├── tools/
+│   └── cloud_probe.py              # routed_experts 分布离线分析
 ├── output/                         # 调研报告（Word / HTML / Markdown）
 │   └── rpt_20261113_172650/
 ├── 主流大模型推理引擎对比调研_v9.xlsx   # 九轮调研数据（10 表 167 行）
@@ -208,6 +216,38 @@ python r3_verify.py \
   --enforce-eager
 ```
 
+### 4. 静默降级检测（拿到启动日志就能跑，30 秒）
+
+```bash
+python silent_degradation.py --log vllm_startup.log --model-gib 7.84
+# 或
+docker logs vllm 2>&1 | python silent_degradation.py --stdin
+```
+
+10 条规则，专抓「日志说做了但没生效」：
+
+```
+[CRITICAL] QUANT_EMULATION        量化后端回退，显存涨 3.5 倍
+[CRITICAL] OFFLOAD_NOOP           offload 只记账不搬运
+[CRITICAL] BATCH_INVARIANT_MISSING 开关未生效，R3 数据不可复现
+[WARN]     SDPA_BACKEND_FALLBACK   注意力后端静默回退
+[WARN]     SAMPLING_OVERRIDE       采样参数被 generation_config 覆盖
+```
+
+`--model-gib` 是可选的：不给就只能提示「需要核对」，给了才能精确判定 offload 是否真的搬运了。
+
+### 5. 可复现性门禁（第 4 类校验）
+
+```bash
+cd determinism
+python gemm_gate.py --both --dtype bf16        # GEMM 路径分叉
+python attention_gate.py --dtype bf16          # 后端 / mask / KV 长度
+python moe_gate.py --dtype bf16                # combine 顺序 / capacity
+python skeleton_moe.py                         # MoE 与 HF 对齐（零下载）
+```
+
+前三类全绿不代表数据可用。**这一层专门抓「格式全对但换 batch 就变」的情况。**
+
 ## 真实环境踩坑记录（最有价值的部分）
 
 在 **Windows + WSL2 + RTX 5060 8GB + vLLM 0.33.0 + Qwen1.5-MoE-A2.7B-GPTQ-Int4** 上实测，
@@ -239,16 +279,44 @@ Windows 占用:    1.11 GiB
 > **结论：8GB 消费级卡 + WSL2 + vLLM 0.33 跑 14B MoE，在当前软件栈下是硬件天花板。**
 > 这不是"参数没调对"，而是 vLLM 的 CPU offload 在「WSL + Blackwell sm_120 + GPTQ 量化 MoE」这个四重叠加场景下存在实现缺陷——这种组合不在它的测试矩阵里。
 
-## 设计哲学：校验的应该是环境，不只是数据
+## 设计哲学：四类校验，层层递进
 
 最初以为适配层的核心是校验 `routed_experts` 的 shape/dtype/合法性。
 但真实环境跑下来发现：**真正让人卡住 2 小时的，从来不是数据格式，而是环境前提。**
 
-所以这个库真正该做的三件事：
+而格式校验还有一个更深的盲区：**它对"数据不可复现"完全无感**。
+`3/768` 那种翻转，shape 对、dtype 对、ID 全合法。
 
-1. **启动前检查**：CUDA 版本 / 架构 / 空闲显存 / host 内存 / 必要动态库，不满足就明确报错
-2. **契约校验**：shape、dtype（uint8 vs uint16）、`-1` 哨兵、越界 ID、末 token 无路由
-3. **静默降级检测**：`falling back to device memory`、`offloaded 0.16GB` 这类"不报错但失效"的情况
+所以这个库真正该做的四件事：
+
+| # | 校验类 | 文件 | 回答什么问题 | 典型盲区 |
+|---|---|---|---|---|
+| 1 | 环境 | `env_check.py` | 这台机器跑得起来吗 | — |
+| 2 | 格式 | `r3_contract.py` | 数据结构符合契约吗 | 格式对但数据不可复现 |
+| 3 | 静默降级 | `silent_degradation.py` | 日志说做了，真做了吗 | 只记账不搬运、开关未生效 |
+| 4 | 可复现性 | `determinism/` | 换个 batch 还成立吗 | — |
+
+**第 4 类是最容易被跳过、也最致命的一类。** 前三类全绿，数据依然可能不可用。
+
+### 第 4 类的实测结论
+
+三层门禁在 RTX 5060 Laptop 8GB / bf16 下的结果：
+
+| 层 | 裂缝 | 影响面 | 约束 |
+|---|---|---|---|
+| GEMM | `M=1` vs `M≥2`（gemv / gemm） | 0.1% | decode `M ≥ 2` |
+| Attention | 四个 SDPA 后端互不一致 | 23% | 启动时锁定一个 |
+| Attention | `is_causal` vs 显式 mask | 6.6% | 统一写法 |
+| Attention | KV 总长度 `S` 变化 | 23% | 全局固定 `S` |
+| MoE | combine 顺序（slot vs expert） | 17% | 按 slot 累加 |
+| MoE | capacity 溢出 | 静默丢 token | `C` ≥ 2.5× 期望 |
+
+**根因只有一个：同一段数学存在多套代码路径，路径之间的浮点归约顺序不同。**
+
+所以不变量不是「固定 shape」，是**「固定代码路径」**——
+把运行时 dispatch 变成启动时配置。
+
+细节见 [`r3-adapter/determinism/README.md`](r3-adapter/determinism/README.md)。
 
 ## 调研数据
 
