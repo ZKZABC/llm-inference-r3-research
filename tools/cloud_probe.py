@@ -158,7 +158,10 @@ def distribution_shape(routes, num_experts, top_n=10):
 def temporal_locality(routes, num_experts):
     """
     相邻 token 在同一层的专家重叠率。
-    随机基线 = k/E（两个 k 元子集随机相交的期望）
+    随机基线 = k/E
+
+    必须看中位数和零值比例：均值会被少数「连续相同段」拉高，
+    而实际逐 token 可能是点状抖动（大量 0）。
     """
     N, L, k = routes.shape
     if N < 2:
@@ -171,11 +174,14 @@ def temporal_locality(routes, num_experts):
             b = set(routes[i + 1, layer].tolist())
             overlaps.append(len(a & b) / k)
 
-    mean_ov = float(np.mean(overlaps))
+    arr = np.array(overlaps)
+    mean_ov = float(arr.mean())
     baseline = k / num_experts
 
     return {
         "mean_overlap": round(mean_ov, 4),
+        "median_overlap": round(float(np.median(arr)), 4),
+        "zero_ratio": round(float((arr == 0).mean()), 4),
         "random_baseline": round(baseline, 4),
         "ratio_vs_random": round(mean_ov / baseline, 2) if baseline > 0 else None,
         "n_pairs": len(overlaps),
@@ -184,9 +190,11 @@ def temporal_locality(routes, num_experts):
 
 def semantic_locality(per_prompt_routes, num_experts):
     """
-    同一 prompt 内的专家重叠 vs 跨 prompt 的重叠。
+    同 prompt 相邻 token vs 跨 prompt 相邻 token 的重叠率。
 
-    若同 prompt 明显更高 → 存在语义局部性（可以按 workload 做缓存）
+    两者必须是同一个量纲，否则不可比。
+    早期版本用「专家集合的 Jaccard」算跨 prompt，
+    但每个 prompt 都覆盖全部专家，那个恒等于 1，毫无意义。
     """
     k = per_prompt_routes[0].shape[-1]
     within, across = [], []
@@ -199,19 +207,24 @@ def semantic_locality(per_prompt_routes, num_experts):
                 b = set(routes[i + 1, layer].tolist())
                 within.append(len(a & b) / k)
 
+    # 跨 prompt：A 的末尾 token vs B 的开头 token，同为「相邻」语义
     for p in range(len(per_prompt_routes) - 1):
-        a = per_prompt_routes[p]
-        b = per_prompt_routes[p + 1]
-        L = min(a.shape[1], b.shape[1])
+        a_routes = per_prompt_routes[p]
+        b_routes = per_prompt_routes[p + 1]
+        L = min(a_routes.shape[1], b_routes.shape[1])
         for layer in range(L):
-            sa = set(a[:, layer, :].reshape(-1).tolist())
-            sb = set(b[:, layer, :].reshape(-1).tolist())
-            across.append(len(sa & sb) / max(len(sa | sb), 1))
+            sa = set(a_routes[-1, layer].tolist())
+            sb = set(b_routes[0, layer].tolist())
+            across.append(len(sa & sb) / k)
+
+    w = float(np.mean(within)) if within else 0.0
+    a = float(np.mean(across)) if across else 0.0
 
     return {
-        "within_prompt_overlap": round(float(np.mean(within)), 4) if within else None,
-        "across_prompt_jaccard": round(float(np.mean(across)), 4) if across else None,
-        "note": "within 是相邻 token 的 k 元交集比例；across 是两个 prompt 专家集合的 Jaccard",
+        "within_prompt_overlap": round(w, 4),
+        "across_prompt_overlap": round(a, 4),
+        "ratio": round(w / a, 2) if a > 0 else None,
+        "note": "两者都是相邻 token 的 k 元交集比例；ratio > 1 说明同 prompt 内更集中",
     }
 
 
@@ -219,8 +232,7 @@ def capacity_stats(routes, num_experts, ks):
     """
     模拟 batch 推理：取 M 个 token 一批，统计每个 expert 的负载。
 
-    返回不同 M 下「最忙 expert / 期望值」的倍数。
-    这个倍数就是 capacity_factor 至少要取到多少。
+    倍数会随 M 变小而爆炸（分母太小），所以同时给出峰值绝对值和建议的 C。
     """
     N, L, k = routes.shape
     out = []
@@ -228,63 +240,97 @@ def capacity_stats(routes, num_experts, ks):
     for m in ks:
         if m > N:
             continue
-        worst_ratios = []
-        worst_over_mean = 0.0
+        worst_ratio = 0.0
+        worst_peak = 0.0
+        ratios = []
         for layer in range(L):
             seg = routes[:m, layer, :].reshape(-1)
             counts = np.bincount(seg, minlength=num_experts).astype(float)
             mean = counts.mean()
             if mean <= 0:
                 continue
-            ratio = counts.max() / mean
-            worst_ratios.append(ratio)
-            worst_over_mean = max(worst_over_mean, ratio)
+            ratios.append(counts.max() / mean)
+            if counts.max() > worst_peak:
+                worst_peak = float(counts.max())
+                worst_ratio = float(counts.max() / mean)
+
+        if not ratios:
+            continue
 
         out.append(
             {
                 "M": int(m),
                 "expected_per_expert": round(m * k / num_experts, 2),
-                "max_over_mean_layer_avg": round(float(np.mean(worst_ratios)), 2) if worst_ratios else None,
-                "max_over_mean_worst": round(float(worst_over_mean), 2),
+                "max_over_mean_layer_avg": round(float(np.mean(ratios)), 2),
+                "max_over_mean_worst": round(worst_ratio, 2),
+                "peak_count": int(worst_peak),
+                "suggested_C": int(np.ceil(worst_peak * 1.15)),
             }
         )
     return out
 
 
 def interpret(cov, dist, temp, sem, cap):
-    """把数字翻译成决策"""
+    """把数字翻译成决策，且不做过强的断言"""
     lines = []
 
     last = cov[-1] if cov else None
     if last:
         ratio = last["actual_unique"] / max(last["uniform_expected"], 1e-9)
-        if ratio > 0.97:
-            lines.append(f"覆盖度 {ratio:.1%} 于随机基线 → 无局部性，不要做专家缓存")
-        elif ratio > 0.85:
-            lines.append(f"覆盖度 {ratio:.1%} 于随机基线 → 弱局部性，只能做软分层")
-        else:
-            lines.append(f"覆盖度 {ratio:.1%} 于随机基线 → 存在明显局部性，可考虑分级缓存")
+        lines.append(
+            f"覆盖度 {ratio:.1%} 于随机基线 —— 但 unique 是基数不是分布，"
+            "这一项不能单独用于判断局部性"
+        )
 
     if dist["cv"] < 0.1:
-        lines.append(f"分布变异系数 {dist['cv']} → 接近均匀，load balancing 生效良好")
+        lines.append(
+            f"边际分布均匀：cv={dist['cv']}，top-10 {dist['top10_share']:.1%}"
+            f"（均匀 {dist['uniform_top10_share']:.1%}），最忙/均值 {dist['max_over_mean']}x"
+        )
     else:
-        lines.append(f"分布变异系数 {dist['cv']} → 有明显偏斜，最忙 expert 是均值的 {dist['max_over_mean']}x")
+        lines.append(
+            f"边际分布有偏斜：cv={dist['cv']}，最忙/均值 {dist['max_over_mean']}x"
+        )
 
     t = temp.get("ratio_vs_random")
     if t is not None:
+        med = temp.get("median_overlap", 0)
+        zero = temp.get("zero_ratio", 0)
         if t < 1.2:
-            lines.append(f"相邻 token 重叠 {t}x 随机 → 无时间局部性，预取无收益")
+            lines.append(f"相邻 token 重叠 {t}x 随机 → 无时间局部性")
+        elif med == 0 or zero > 0.5:
+            lines.append(
+                f"相邻 token 重叠 {t}x 随机，但中位数 {med}、零值占 {zero:.0%}"
+                " → 少数连续段拉高均值，逐 token 是点状抖动，预取收益有限"
+            )
         else:
-            lines.append(f"相邻 token 重叠 {t}x 随机 → 有时间局部性，可做权重预取")
+            lines.append(
+                f"相邻 token 重叠 {t}x 随机，中位数 {med} → 有稳定时间局部性，预取有价值"
+            )
 
-    w = sem.get("within_prompt_overlap")
-    a = sem.get("across_prompt_jaccard")
-    if w is not None and a is not None and a > 0:
-        lines.append(f"同 prompt 内 {w} vs 跨 prompt {a} → 比值 {w / max(a, 1e-9):.1f}x")
+    r = sem.get("ratio")
+    if r is not None:
+        if r > 1.5:
+            lines.append(f"同 prompt 内比跨 prompt 高 {r}x → 存在语义局部性")
+        else:
+            lines.append(f"同 prompt vs 跨 prompt 比值 {r}x → 语义局部性不强")
 
     if cap:
-        worst = max(c["max_over_mean_worst"] for c in cap)
-        lines.append(f"capacity 峰值倍数 {worst:.2f}x → capacity_factor 至少取 {worst + 0.5:.1f}")
+        small = [c for c in cap if c["M"] <= 32]
+        large = [c for c in cap if c["M"] >= 256]
+        if small:
+            w = max(small, key=lambda c: c["max_over_mean_worst"])
+            lines.append(
+                f"小 batch M={w['M']}：峰值 {w['peak_count']} 个 vs 期望 {w['expected_per_expert']:.2f} "
+                f"→ 建议 C={w['suggested_C']}（{w['max_over_mean_worst']}x 是分母小造成的，不能当 factor 用）"
+            )
+        if large:
+            w = max(large, key=lambda c: c["max_over_mean_worst"])
+            lines.append(
+                f"大 batch M={w['M']}：峰值 {w['peak_count']} 个 vs 期望 {w['expected_per_expert']:.2f} "
+                f"→ 建议 C={w['suggested_C']}"
+            )
+        lines.append("capacity_factor 必须随 M 变：小 batch 需要更大的绝对冗余")
 
     return lines
 
@@ -354,18 +400,27 @@ def main() -> int:
 
     print("\n③ 时间局部性")
     print("─" * 68)
-    print(f"  相邻 token 重叠 {temp['mean_overlap']} vs 随机 {temp['random_baseline']} → {temp['ratio_vs_random']}x")
+    if "median_overlap" in temp:
+        print(f"  相邻 token 重叠  均值 {temp['mean_overlap']}  中位数 {temp['median_overlap']}")
+        print(f"  零重叠占比       {temp['zero_ratio']:.1%}")
+        print(f"  随机基线         {temp['random_baseline']}  → {temp['ratio_vs_random']}x")
+    else:
+        print(f"  {temp.get('note', '无数据')}")
 
     print("\n④ 语义局部性")
     print("─" * 68)
-    print(f"  同 prompt 内 {sem['within_prompt_overlap']}")
-    print(f"  跨 prompt   {sem['across_prompt_jaccard']}")
+    print(f"  同 prompt 相邻   {sem['within_prompt_overlap']}")
+    print(f"  跨 prompt 相邻   {sem['across_prompt_overlap']}")
+    print(f"  比值             {sem['ratio']}x（>1 说明同 prompt 内更集中）")
 
     print("\n⑤ capacity 分布")
     print("─" * 68)
-    print(f"  {'M':>5} {'期望/专家':>10} {'峰值/均值(层均)':>16} {'峰值/均值(最差)':>16}")
+    print(f"  {'M':>5} {'期望/专家':>10} {'峰值/均值':>10} {'峰值个数':>9} {'建议 C':>8}")
     for c in cap:
-        print(f"  {c['M']:>5} {c['expected_per_expert']:>10} {c['max_over_mean_layer_avg']:>16} {c['max_over_mean_worst']:>16}")
+        print(
+            f"  {c['M']:>5} {c['expected_per_expert']:>10} "
+            f"{c['max_over_mean_worst']:>10} {c['peak_count']:>9} {c['suggested_C']:>8}"
+        )
 
     lines = interpret(cov, dist, temp, sem, cap)
     print("\n" + "=" * 68)
