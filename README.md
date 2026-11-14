@@ -20,7 +20,7 @@
 │   │   ├── attention_gate.py       #   后端 / mask / KV 长度
 │   │   ├── moe_gate.py             #   combine 顺序 / capacity 溢出
 │   │   └── skeleton_moe.py         #   MoE 实现与 HF 对齐的参考实现
-│   ├── test_r3_contract.py         # unittest 测试套件（11 项）
+│   ├── test_r3_contract.py         # unittest 测试套件（16 项）
 │   ├── contract_check.py           # 纯逻辑契约测试（无需 GPU）
 │   ├── mini_moe_r3.py              # 微型 MoE 在 CPU 上验证 R3 数学命题
 │   ├── r3_verify.py                # 真实 vLLM 环境验证脚本（需 GPU）

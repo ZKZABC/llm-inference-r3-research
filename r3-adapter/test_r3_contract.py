@@ -17,6 +17,7 @@ from r3_contract import (
     normalize_routed_experts,
     validate_shape,
     handle_null,
+    compare_routes,
     check_replay_weights,
     make_wrong_weights,
     verify_replay_consistency,
@@ -73,6 +74,40 @@ class TestNull(unittest.TestCase):
     def test_normal_must_not_be_none(self):
         with self.assertRaises(ValueError):
             handle_null(None, request_aborted=False)
+
+
+class TestCompareRoutes(unittest.TestCase):
+    def test_identical_routes(self):
+        a = np.array([[[1, 2, 3, 4], [5, 6, 7, 8]]], dtype=np.int32)
+        r = compare_routes(a, a.copy())
+        self.assertEqual(r["agreement"], 1.0)
+        self.assertEqual(r["n_mismatch"], 0)
+        self.assertEqual(r["positions"], [])
+
+    def test_order_only_differs(self):
+        a = np.array([[[1, 2, 3, 4]]], dtype=np.int32)
+        b = np.array([[[4, 3, 2, 1]]], dtype=np.int32)
+        self.assertEqual(compare_routes(a, b, mode="set")["agreement"], 1.0)
+        self.assertLess(compare_routes(a, b, mode="strict")["agreement"], 1.0)
+
+    def test_one_expert_swapped(self):
+        a = np.array([[[1, 2, 3, 4]]], dtype=np.int32)
+        b = np.array([[[1, 2, 3, 9]]], dtype=np.int32)
+        r = compare_routes(a, b, threshold=0.99)
+        self.assertEqual(r["n_mismatch"], 1)
+        self.assertFalse(r["passed"])
+        self.assertEqual(r["positions"][0][:2], (0, 0))
+
+    def test_shape_mismatch_is_noted(self):
+        a = np.ones((3, 2, 4), dtype=np.int32)
+        b = np.ones((5, 2, 4), dtype=np.int32)
+        r = compare_routes(a, b)
+        self.assertIsNotNone(r["note"])
+        self.assertEqual(r["n_slots"], 3 * 2)
+
+    def test_bad_ndim_rejected(self):
+        with self.assertRaises(ValueError):
+            compare_routes(np.zeros((4, 2)), np.zeros((4, 2)))
 
 
 class TestReplayWeights(unittest.TestCase):

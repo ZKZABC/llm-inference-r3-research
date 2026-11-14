@@ -3,11 +3,12 @@
 
 把「防止别人踩 15.84% 的坑」从「靠人记着」变成「靠代码拦住」。
 
-提供 5 个校验原语，接入方（RL 训练框架）直接 import：
+提供 6 个校验原语，接入方（RL 训练框架）直接 import：
 
   normalize_routed_experts    dtype 归一化 + 合法性校验 + unmappable 统计
   validate_shape              末 token 无路由的 shape 断言
   handle_null                 被抢占/中止请求的 None 处理
+  compare_routes              ★ 对比「记录的路由」与「重算的路由」是否一致
   check_replay_weights        ★ 校验回放权重是否从完整 logits 正确 gather
   verify_replay_consistency   端到端校验回放后 logprob 是否一致（应归零）
 
@@ -77,7 +78,70 @@ def handle_null(routed, request_aborted):
 
 
 # ---------------------------------------------------------------------------
-# 2. 回放权重校验（★ 核心：拦住 15.84% 的坑，需要 torch）
+# 2. 路由一致性校验（★ 回放时路由是否真的对上了）
+# ---------------------------------------------------------------------------
+
+def compare_routes(recorded, replayed, mode="set", threshold=None, max_report=10):
+    """对比推理侧记录的路由与训练侧重算的路由。
+
+    和 verify_replay_consistency 的分工：
+      · 那个校验 logprob（端到端，要跑模型）
+      · 这个校验路由本身（早、便宜、能定位到具体层和 token）
+    两者不能互相替代：路由一致但权重错 → logprob 会变；
+    logprob 巧合一致但路由不同 → 训练侧回放的是错的专家。
+
+    mode="set"    每行比较专家集合（top-k 内部顺序无关）。R3 关心的是
+                  「选中了哪些专家」，顺序不影响按索引 gather 的权重。
+    mode="strict" 逐元素比较，顺序敏感，仅用于排查 kernel 行为。
+
+    threshold     若给出，结果里附带 passed 字段（agreement >= threshold）。
+
+    返回 dict: agreement / n_slots / n_mismatch / positions / note
+
+    实测参考（A10 + VLLM_BATCH_INVARIANT=1，941 个 token）：
+    长 prompt 的不一致率在 0% ~ 0.12% 之间，且随输入变化。
+    它不是一个能「调到 0」的量，只能监控。
+    """
+    a = np.asarray(recorded)
+    b = np.asarray(replayed)
+
+    if a.ndim != 3 or b.ndim != 3:
+        raise ValueError(f"期望 [tokens, layers, top_k]，收到 {a.shape} 与 {b.shape}")
+
+    note = None
+    if a.shape != b.shape:
+        n = min(a.shape[0], b.shape[0])
+        note = f"shape 不一致 {a.shape} vs {b.shape}，比较前 {n} 行"
+        a, b = a[:n], b[:n]
+
+    if mode == "strict":
+        bad_slot = (a != b).any(axis=-1)
+    else:
+        bad_slot = (np.sort(a, axis=-1) != np.sort(b, axis=-1)).any(axis=-1)
+
+    total = int(bad_slot.size)
+    n_bad = int(bad_slot.sum())
+    agreement = 1.0 - n_bad / max(total, 1)
+
+    positions = [
+        (int(t), int(l), a[t, l].tolist(), b[t, l].tolist())
+        for t, l in np.argwhere(bad_slot)[:max_report]
+    ]
+
+    result = {
+        "agreement": agreement,
+        "n_slots": total,
+        "n_mismatch": n_bad,
+        "positions": positions,
+        "note": note,
+    }
+    if threshold is not None:
+        result["passed"] = agreement >= threshold
+    return result
+
+
+# ---------------------------------------------------------------------------
+# 3. 回放权重校验（★ 核心：拦住 15.84% 的坑，需要 torch）
 # ---------------------------------------------------------------------------
 
 def check_replay_weights(router_logits, topk_idx, replayed_weights, rtol=1e-5):
