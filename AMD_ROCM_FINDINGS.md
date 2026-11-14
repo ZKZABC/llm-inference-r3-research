@@ -2,14 +2,22 @@
 
 > 日期：2026-11-14
 > 环境：23 核 / 200GB 内存 / 192GB 显存，ROCm 7.2，torch 2.12，transformers 5.15
-> 模型：Qwen1.5-MoE-A2.7B-GPTQ-Int4（NFS 共享，int4 在 ROCm 正常加载，TRITON MoE，无 EMULATION）
+> 模型：Qwen1.5-MoE-A2.7B-GPTQ-Int4（int4 在 ROCm 正常加载，TRITON MoE，无 EMULATION）
 
-## 三个结论
+## 最终结论：R3 契约双厂商成立 ✅
 
-### ① R3 capture 跨厂商可用 ✅
+| 条件 | NVIDIA A10 | AMD gfx942 |
+|---|---|---|
+| ① 推理侧可复现（批不变） | ✅ 0/768 | ✅ 10/10 全一致（修 LDS 后） |
+| ② 训练侧可回放 | ✅ bit-identical | （CPU 回放已验证，架构无关） |
+| R3 capture | ✅ | ✅ |
 
-`--enable-return-routed-experts` 在 0.28 ROCm 上正常返回 routed_experts
-（shape `[tokens,24,4]`、uint8、unique=60）。路由统计与 NVIDIA A10 高度一致：
+AMD 侧唯一障碍是 batch_invariant kernel 的 LDS 配置，**一行 sed 修复**后即闭合。
+
+## ① R3 capture 跨厂商可用
+
+`--enable-return-routed-experts` 在 0.28 ROCm 正常返回 routed_experts
+（`[tokens,24,4]`、uint8、unique=60）。路由统计与 NVIDIA 高度一致：
 
 | 指标 | NVIDIA A10 | AMD gfx942 |
 |---|---|---|
@@ -18,48 +26,42 @@
 | 时间局部性 | 2.27x | 2.27x |
 | 语义局部性 | 2.64x | 1.59x |
 
-→ 适配层的测量不绑定 GPU 厂商。
+→ 适配层测量不绑定 GPU 厂商。
 
-### ② batch_invariant 崩溃根因 = LDS 超限（可调，非缺实现）❌→🔧
+## ② batch_invariant：LDS 超限根因 + 一行修复
 
-开 `VLLM_BATCH_INVARIANT=1` 时 engine init 崩溃，根因：
+**根因**（开开关时 engine init 崩溃）：
 
 ```
-triton.runtime.errors.OutOfResources: out of resource: shared memory,
-Required: 98304, Hardware limit: 65536.
-Reducing block sizes or `num_stages` may help.
+triton.runtime.errors.OutOfResources: shared memory,
+Required: 98304, Hardware limit: 65536
 ```
 
-路径：`linear_batch_invariant → matmul_persistent → matmul_kernel_persistent`。
-持久化 matmul kernel 按 NVIDIA 的 shared memory 调块（要 96KB），
-gfx942 每 workgroup 只有 64KB LDS → 超 1.5 倍。
+`matmul_kernel_persistent` 按 NVIDIA 调块：bf16 `128/128/64, stages3`
+→ `3×(128×64+64×128)×2 = 98304 = 96KB`，超 gfx942 的 64KB LDS。
 
-**这是 kernel 配置问题，不是 ROCm 缺实现。** 减小 BLOCK / num_stages 使其 ≤64KB 即可。
+**修复**（备份后 sed，把 LDS 压到 32KB）：
 
-### ③ 无 invariant 时批方差 = 偶发边界翻转（与 NVIDIA 默认同量级）
-
-关掉开关后 `long_prompt_invariance.py`：4/10 长度分歧，0.004%–0.649%，
-属偶发 top-k 边界翻转，非系统性 kernel 分叉（对照裸 GEMM 分叉 35.9%）。
-→ 条件①（可复现）依赖 invariant kernel；该 kernel 在 AMD 需先修 LDS。
-
-## 判定表落地
-
-| 项 | 结果 |
-|---|---|
-| int4 加载 ROCm | ✅ TRITON，无 EMULATION |
-| R3 capture | ✅ |
-| batch_invariant（默认配置） | ❌ LDS OOM |
-| batch_invariant（修 LDS 后） | 待验证 |
-| 无 invariant 批方差 | 0.004–0.65%（偶发） |
-
-## 下一步（可选）
-
-修 `batch_invariant.py` 的 `matmul_kernel_persistent`：在 HIP 下减小
-`num_stages`/`BLOCK_K` 使 shared ≤64KB，再开 `VLLM_BATCH_INVARIANT=1`
-复跑 `long_prompt_invariance.py`，若全 PASS 则条件①在 AMD 也成立。
-
-检查 kernel 配置：
 ```bash
-grep -n "num_stages\|BLOCK_SIZE\|def matmul_persistent" \
-  /usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/batch_invariant.py
+F=.../vllm/model_executor/layers/batch_invariant.py
+cp "$F" "$F.bak"
+sed -i 's/"num_stages": 3/"num_stages": 2/g; s/"BLOCK_SIZE_K": 64/"BLOCK_SIZE_K": 32/g' "$F"
+# 2×(128×32+32×128)×2 = 32768 = 32KB ≤ 64KB
 ```
+
+batch-invariant 的确定性来自**固定 tile 归约顺序**，不依赖块大小，故缩块不破坏不变性。
+
+**修复后**：开 `VLLM_BATCH_INVARIANT=1` 正常启动，`long_prompt_invariance.py`
+10/10 长度全一致 → 条件①在 AMD 成立。
+
+## ③ 无 invariant 时的批方差（修复前对照）
+
+关开关时 4/10 长度有 0.004%–0.649% 偶发边界翻转（同 NVIDIA 默认量级），
+确认条件①依赖 invariant kernel。修复后归零。
+
+## 注意
+
+- 该 sed 是**测试性 hack**：牺牲少量 matmul 吞吐换 LDS 合规。上游应加 HIP-aware
+  配置（按 `torch.version.hip` 选 block/stages），而非全局缩块。
+- 回滚：`cp "$F.bak" "$F"`。
+- 缩块后仍全一致，验证了"不变性来自归约顺序而非块大小"的设计假设。
